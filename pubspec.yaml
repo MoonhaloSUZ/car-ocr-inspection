@@ -1,0 +1,34 @@
+name: field_inspection
+description: 현장점검 점검표 앱
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.6
+  sqflite: ^2.3.2
+  path: ^1.9.0
+  path_provider: ^2.1.2
+  image_picker: ^1.1.2
+  provider: ^6.1.2
+  intl: ^0.19.0
+  pdf: ^3.10.8
+  printing: ^5.12.0
+  excel: ^4.0.6
+  share_plus: ^9.0.0
+  uuid: ^4.3.3
+  flutter_slidable: ^3.1.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.1
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/fonts/
