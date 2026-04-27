@@ -3,8 +3,8 @@ import 'package:sqflite/sqflite.dart';
 import 'package:path/path.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
-import '../models/checklist_template.dart';
-import '../models/inspection.dart';
+import '../models/vehicle.dart';
+import '../models/inspection_record.dart';
 
 class DatabaseService {
   static final DatabaseService _instance = DatabaseService._internal();
@@ -14,8 +14,289 @@ class DatabaseService {
   static Database? _db;
   final _uuid = const Uuid();
 
-  // ─── 사진 경로 헬퍼 ────────────────────────────────────────────────
-  // DB에는 파일명만 저장하고, 실제 경로는 런타임에 조합
+  Future<Database> get database async {
+    _db ??= await _initDb();
+    return _db!;
+  }
+
+  Future<Database> _initDb() async {
+    final dbPath = join(await getDatabasesPath(), 'livestock_v2.db');
+    return openDatabase(dbPath, version: 1, onCreate: _onCreate);
+  }
+
+  Future<void> _onCreate(Database db, int version) async {
+    await db.execute('''
+      CREATE TABLE vehicles (
+        id TEXT PRIMARY KEY,
+        serial_no INTEGER NOT NULL DEFAULT 0,
+        plate_no TEXT NOT NULL,
+        owner TEXT NOT NULL DEFAULT '',
+        vehicle_type TEXT NOT NULL DEFAULT '',
+        axle_count TEXT NOT NULL DEFAULT '',
+        gross_weight TEXT NOT NULL DEFAULT '',
+        max_load TEXT NOT NULL DEFAULT '',
+        modem_no TEXT NOT NULL DEFAULT '',
+        sensor_id TEXT NOT NULL DEFAULT '',
+        camera_id TEXT NOT NULL DEFAULT ''
+      )
+    ''');
+
+    await db.execute('''
+      CREATE TABLE inspections (
+        id TEXT PRIMARY KEY,
+        created_at TEXT NOT NULL,
+        mgmt_no TEXT NOT NULL DEFAULT '',
+        inspection_date TEXT NOT NULL DEFAULT '',
+        driver_org TEXT NOT NULL DEFAULT '',
+        driver_name TEXT NOT NULL DEFAULT '',
+        driver_contact TEXT NOT NULL DEFAULT '',
+        plate_no TEXT NOT NULL DEFAULT '',
+        vehicle_type TEXT NOT NULL DEFAULT '',
+        gross_weight TEXT NOT NULL DEFAULT '',
+        axle_count TEXT NOT NULL DEFAULT '',
+        max_load TEXT NOT NULL DEFAULT '',
+        modem_no TEXT NOT NULL DEFAULT '',
+        sensor_id TEXT NOT NULL DEFAULT '',
+        camera_id TEXT NOT NULL DEFAULT '',
+        empty_gross_weight TEXT NOT NULL DEFAULT '',
+        empty_error_rate TEXT NOT NULL DEFAULT '',
+        full_gross_weight TEXT NOT NULL DEFAULT '',
+        full_error_rate TEXT NOT NULL DEFAULT '',
+        ch1 TEXT NOT NULL DEFAULT '',
+        ch2 TEXT NOT NULL DEFAULT '',
+        ch3 TEXT NOT NULL DEFAULT '',
+        ch4 TEXT NOT NULL DEFAULT '',
+        ch5 TEXT NOT NULL DEFAULT '',
+        ch6 TEXT NOT NULL DEFAULT '',
+        ch7 TEXT NOT NULL DEFAULT '',
+        ch8 TEXT NOT NULL DEFAULT '',
+        scale_empty_ax1 TEXT NOT NULL DEFAULT '',
+        scale_empty_ax2 TEXT NOT NULL DEFAULT '',
+        scale_empty_ax3 TEXT NOT NULL DEFAULT '',
+        scale_empty_ax4 TEXT NOT NULL DEFAULT '',
+        scale_empty_total TEXT NOT NULL DEFAULT '',
+        scale_full_ax1 TEXT NOT NULL DEFAULT '',
+        scale_full_ax2 TEXT NOT NULL DEFAULT '',
+        scale_full_ax3 TEXT NOT NULL DEFAULT '',
+        scale_full_ax4 TEXT NOT NULL DEFAULT '',
+        scale_full_total TEXT NOT NULL DEFAULT '',
+        scale_type TEXT NOT NULL DEFAULT ''
+      )
+    ''');
+
+    await db.execute('''
+      CREATE TABLE slot_photos (
+        id TEXT PRIMARY KEY,
+        inspection_id TEXT NOT NULL,
+        slot_key TEXT NOT NULL,
+        photo_path TEXT NOT NULL
+      )
+    ''');
+
+    await _seedVehicles(db);
+  }
+
+  Future<void> _seedVehicles(Database db) async {
+    final rows = [
+      [
+        1,
+        '86누0773',
+        '남원그린영농조합법인',
+        '현대',
+        '3',
+        '38',
+        '23',
+        '012-3328-8152',
+        'RLS21-008',
+        'CA21-008'
+      ],
+      [
+        2,
+        '82서3492',
+        '남원그린영농조합법인',
+        '대우',
+        '3',
+        '38',
+        '',
+        '012-2135-9650',
+        'WS2015-034',
+        'CA15-034'
+      ],
+      [
+        3,
+        '80저0939',
+        '남원양돈협회영농조합법인',
+        '대우',
+        '3',
+        '38',
+        '23',
+        '012-2147-4491',
+        'WS2015-071',
+        'CA15-071'
+      ],
+      [
+        4,
+        '81조6496',
+        '남원양돈협회영농조합법인',
+        '대우',
+        '3',
+        '38',
+        '23',
+        '012-2147-4479',
+        'WS2015-079',
+        'CA15-079'
+      ],
+      [
+        5,
+        '94수4881',
+        '남원양돈협회영농조합법인',
+        '현대',
+        '3',
+        '38',
+        '23',
+        '012-4108-6655',
+        'T2-STR22-145',
+        'CA22-145'
+      ],
+      [
+        6,
+        '80저0970',
+        '남원축협',
+        '현대',
+        '3',
+        '38',
+        '23',
+        '012-2941-1957',
+        'RLS-091',
+        'CALS-091'
+      ],
+      [
+        7,
+        '95나1902',
+        '남원축협',
+        '현대',
+        '3',
+        '38',
+        '23',
+        '012-2147-4474',
+        'WS2015-082',
+        'CA15-082'
+      ],
+      [
+        8,
+        '80저0997',
+        '에코바이오영농조합법인',
+        '현대',
+        '3',
+        '15',
+        '8',
+        '012-4108-6654',
+        'T2-STR22-144',
+        'CA22-144'
+      ],
+      [
+        9,
+        '81조6470',
+        '에코바이오영농조합법인',
+        '현대',
+        '3',
+        '15',
+        '8',
+        '012-4108-6652',
+        'T2-STR22-142',
+        'CA22-142'
+      ],
+      [
+        10,
+        '95가9142',
+        '에코바이오영농조합법인',
+        '현대',
+        '3',
+        '15',
+        '8',
+        '012-2131-5555',
+        'WS2015-235',
+        'CA15-235'
+      ],
+      [
+        11,
+        '96부6117',
+        '에코바이오영농조합법인',
+        '대우',
+        '3',
+        '15',
+        '8',
+        '012-4108-6653',
+        'T2-STR22-143',
+        'CA22-143'
+      ],
+      [
+        12,
+        '94수4700',
+        '영농조합법인서남원',
+        '볼보',
+        '3',
+        '15',
+        '8',
+        '012-4119-2314',
+        'T3-STR22-067',
+        'CA22-067'
+      ],
+      [
+        13,
+        '94수4790',
+        '영농조합법인서남원',
+        '볼보',
+        '3',
+        '15',
+        '8',
+        '012-4119-2282',
+        'T3-STR22-047',
+        'CA22-047'
+      ],
+      [
+        14,
+        '94수4999',
+        '친환경현대그린영농조합법인',
+        '현대',
+        '3',
+        '15',
+        '8',
+        '012-4108-6686',
+        'T3-STR22-009',
+        'CA22-009'
+      ],
+      [
+        15,
+        '90러8789',
+        '친환경현대그린영농조합법인',
+        '현대',
+        '3',
+        '15',
+        '8',
+        '012-5564-0030',
+        'T3-25-030',
+        'CA25-030'
+      ],
+    ];
+    for (final r in rows) {
+      await db.insert('vehicles', {
+        'id': _uuid.v4(),
+        'serial_no': r[0],
+        'plate_no': r[1],
+        'owner': r[2],
+        'vehicle_type': r[3],
+        'axle_count': r[4],
+        'gross_weight': r[5],
+        'max_load': r[6],
+        'modem_no': r[7],
+        'sensor_id': r[8],
+        'camera_id': r[9],
+      });
+    }
+  }
+
+  // ─── Photo path helpers ────────────────────────────────────────────────
   static String? _photoBasePath;
 
   static Future<String> getPhotoBasePath() async {
@@ -27,411 +308,155 @@ class DatabaseService {
     return _photoBasePath!;
   }
 
-  /// 파일명 → 전체 절대경로 변환
-  static Future<String> resolvePhotoPath(String fileNameOrPath) async {
-    // 이미 절대경로인 경우 (구버전 데이터 호환)
-    if (fileNameOrPath.startsWith('/') || fileNameOrPath.contains(':\\')) {
-      return fileNameOrPath;
-    }
-    final base = await getPhotoBasePath();
-    return '$base/$fileNameOrPath';
-  }
-
-  Future<Database> get database async {
-    _db ??= await _initDb();
-    return _db!;
-  }
-
-  Future<Database> _initDb() async {
-    final dbPath = join(await getDatabasesPath(), 'field_inspection.db');
-    return openDatabase(
-      dbPath,
-      version: 1,
-      onCreate: _onCreate,
-    );
-  }
-
-  Future<void> _onCreate(Database db, int version) async {
-    await db.execute('''
-      CREATE TABLE categories (
-        id TEXT PRIMARY KEY,
-        title TEXT NOT NULL,
-        sort_order INTEGER NOT NULL DEFAULT 0
-      )
-    ''');
-    await db.execute('''
-      CREATE TABLE items (
-        id TEXT PRIMARY KEY,
-        category_id TEXT NOT NULL,
-        title TEXT NOT NULL,
-        sort_order INTEGER NOT NULL DEFAULT 0,
-        FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE CASCADE
-      )
-    ''');
-    await db.execute('''
-      CREATE TABLE inspections (
-        id TEXT PRIMARY KEY,
-        location TEXT NOT NULL,
-        inspector TEXT NOT NULL DEFAULT '',
-        overall_note TEXT,
-        created_at TEXT NOT NULL
-      )
-    ''');
-    await db.execute('''
-      CREATE TABLE inspection_results (
-        id TEXT PRIMARY KEY,
-        inspection_id TEXT NOT NULL,
-        item_id TEXT NOT NULL,
-        result TEXT,
-        note TEXT,
-        FOREIGN KEY (inspection_id) REFERENCES inspections(id) ON DELETE CASCADE
-      )
-    ''');
-    await db.execute('''
-      CREATE TABLE inspection_photos (
-        id TEXT PRIMARY KEY,
-        inspection_id TEXT NOT NULL,
-        item_id TEXT,
-        photo_path TEXT NOT NULL,
-        FOREIGN KEY (inspection_id) REFERENCES inspections(id) ON DELETE CASCADE
-      )
-    ''');
-
-    await _seedDefaultTemplate(db);
-  }
-
-  Future<void> _seedDefaultTemplate(Database db) async {
-    final defaultData = [
-      {
-        'id': 'cat_safety',
-        'title': '안전관리',
-        'order': 1,
-        'items': [
-          {'id': 'item_s1', 'title': '안전모 착용 여부'},
-          {'id': 'item_s2', 'title': '안전화 착용 여부'},
-          {'id': 'item_s3', 'title': '안전벨트 착용 여부'},
-          {'id': 'item_s4', 'title': '안전 표지판 설치 여부'},
-          {'id': 'item_s5', 'title': '작업 구역 안전선 설치'},
-        ],
-      },
-      {
-        'id': 'cat_facility',
-        'title': '설비 점검',
-        'order': 2,
-        'items': [
-          {'id': 'item_f1', 'title': '소화기 비치 및 상태'},
-          {'id': 'item_f2', 'title': '전기 배선 상태'},
-          {'id': 'item_f3', 'title': '비상구 확보 여부'},
-          {'id': 'item_f4', 'title': '기계·설비 작동 상태'},
-          {'id': 'item_f5', 'title': '누전 차단기 정상 작동'},
-        ],
-      },
-      {
-        'id': 'cat_env',
-        'title': '환경 관리',
-        'order': 3,
-        'items': [
-          {'id': 'item_e1', 'title': '폐기물 분리·처리 상태'},
-          {'id': 'item_e2', 'title': '작업장 청결 유지'},
-          {'id': 'item_e3', 'title': '유해물질 보관 상태'},
-          {'id': 'item_e4', 'title': '환기 시설 작동 여부'},
-        ],
-      },
-      {
-        'id': 'cat_doc',
-        'title': '서류 확인',
-        'order': 4,
-        'items': [
-          {'id': 'item_d1', 'title': '안전교육 이수 여부'},
-          {'id': 'item_d2', 'title': '작업 허가서 비치'},
-          {'id': 'item_d3', 'title': '점검 일지 작성 여부'},
-        ],
-      },
-    ];
-
-    for (int ci = 0; ci < defaultData.length; ci++) {
-      final cat = defaultData[ci];
-      await db.insert('categories', {
-        'id': cat['id'],
-        'title': cat['title'],
-        'sort_order': cat['order'],
-      });
-      final itemList = cat['items'] as List<Map<String, String>>;
-      for (int ii = 0; ii < itemList.length; ii++) {
-        await db.insert('items', {
-          'id': itemList[ii]['id'],
-          'category_id': cat['id'],
-          'title': itemList[ii]['title'],
-          'sort_order': ii + 1,
-        });
-      }
-    }
-  }
-
-  // ─── Template CRUD ──────────────────────────────────────────────────
-
-  Future<List<ChecklistCategory>> getTemplate() async {
+  // ─── Vehicle CRUD ──────────────────────────────────────────────────────
+  Future<List<Vehicle>> getVehicles() async {
     final db = await database;
-    final catMaps = await db.query('categories', orderBy: 'sort_order ASC');
-    final itemMaps = await db.query('items', orderBy: 'sort_order ASC');
-
-    final categories =
-        catMaps.map((m) => ChecklistCategory.fromMap(m)).toList();
-    for (final cat in categories) {
-      cat.items = itemMaps
-          .where((m) => m['category_id'] == cat.id)
-          .map((m) => ChecklistItem.fromMap(m))
-          .toList();
-    }
-    return categories;
+    final maps = await db.query('vehicles', orderBy: 'serial_no ASC');
+    return maps.map((m) => Vehicle.fromMap(m)).toList();
   }
 
-  Future<String> addCategory(String title, int sortOrder) async {
+  Future<Vehicle?> findVehicleByPlate(String plateNo) async {
     final db = await database;
-    final id = _uuid.v4();
-    await db.insert('categories', {
-      'id': id,
-      'title': title,
-      'sort_order': sortOrder,
+    final clean = plateNo.replaceAll(RegExp(r'\s+'), '');
+    final all = await db.query('vehicles');
+    for (final m in all) {
+      final dbPlate = (m['plate_no'] as String).replaceAll(RegExp(r'\s+'), '');
+      if (dbPlate == clean) return Vehicle.fromMap(m);
+    }
+    return null;
+  }
+
+  Future<String> addVehicle(Vehicle v) async {
+    final db = await database;
+    await db.insert('vehicles', v.toMap());
+    return v.id;
+  }
+
+  Future<void> updateVehicle(Vehicle v) async {
+    final db = await database;
+    await db.update('vehicles', v.toMap(), where: 'id = ?', whereArgs: [v.id]);
+  }
+
+  Future<void> deleteVehicle(String id) async {
+    final db = await database;
+    await db.delete('vehicles', where: 'id = ?', whereArgs: [id]);
+  }
+
+  // 새 점검에서 등록된 차량을 차량 목록에 자동 추가
+  Future<void> syncVehicleFromInspection(InspectionRecord rec) async {
+    if (rec.plateNo.isEmpty) return;
+    final existing = await findVehicleByPlate(rec.plateNo);
+    if (existing != null) return; // 이미 있으면 스킵
+    final db = await database;
+    final countMap =
+        await db.rawQuery('SELECT MAX(serial_no) as mx FROM vehicles');
+    final nextSerial = ((countMap.first['mx'] as int?) ?? 0) + 1;
+    await db.insert('vehicles', {
+      'id': _uuid.v4(),
+      'serial_no': nextSerial,
+      'plate_no': rec.plateNo,
+      'owner': rec.driverOrg,
+      'vehicle_type': rec.vehicleType,
+      'axle_count': rec.axleCount,
+      'gross_weight': rec.grossWeight,
+      'max_load': rec.maxLoad,
+      'modem_no': rec.modemNo,
+      'sensor_id': rec.sensorId,
+      'camera_id': rec.cameraId,
     });
-    return id;
   }
 
-  Future<void> updateCategory(String id, String title) async {
+  // ─── Inspection CRUD ───────────────────────────────────────────────────
+  Future<List<InspectionRecord>> getInspections() async {
     final db = await database;
-    await db.update(
-      'categories',
-      {'title': title},
-      where: 'id = ?',
-      whereArgs: [id],
-    );
-  }
-
-  Future<void> deleteCategory(String id) async {
-    final db = await database;
-    await db.delete('categories', where: 'id = ?', whereArgs: [id]);
-  }
-
-  Future<void> reorderCategories(List<ChecklistCategory> categories) async {
-    final db = await database;
-    final batch = db.batch();
-    for (int i = 0; i < categories.length; i++) {
-      batch.update(
-        'categories',
-        {'sort_order': i + 1},
-        where: 'id = ?',
-        whereArgs: [categories[i].id],
-      );
+    final maps = await db.query('inspections', orderBy: 'created_at DESC');
+    final records = maps.map((m) => InspectionRecord.fromMap(m)).toList();
+    for (final rec in records) {
+      rec.photos = await _loadPhotos(rec.id);
     }
-    await batch.commit(noResult: true);
+    return records;
   }
 
-  Future<String> addItem(String categoryId, String title, int sortOrder) async {
-    final db = await database;
-    final id = _uuid.v4();
-    await db.insert('items', {
-      'id': id,
-      'category_id': categoryId,
-      'title': title,
-      'sort_order': sortOrder,
-    });
-    return id;
-  }
-
-  Future<void> updateItem(String id, String title) async {
-    final db = await database;
-    await db.update(
-      'items',
-      {'title': title},
-      where: 'id = ?',
-      whereArgs: [id],
-    );
-  }
-
-  Future<void> deleteItem(String id) async {
-    final db = await database;
-    await db.delete('items', where: 'id = ?', whereArgs: [id]);
-  }
-
-  Future<void> reorderItems(List<ChecklistItem> items) async {
-    final db = await database;
-    final batch = db.batch();
-    for (int i = 0; i < items.length; i++) {
-      batch.update(
-        'items',
-        {'sort_order': i + 1},
-        where: 'id = ?',
-        whereArgs: [items[i].id],
-      );
-    }
-    await batch.commit(noResult: true);
-  }
-
-  // ─── Inspection CRUD ─────────────────────────────────────────────────
-
-  Future<List<Inspection>> getInspections({
-    String? locationFilter,
-    DateTime? dateFrom,
-    DateTime? dateTo,
-  }) async {
-    final db = await database;
-
-    String where = '';
-    final List<dynamic> whereArgs = [];
-
-    if (locationFilter != null && locationFilter.isNotEmpty) {
-      where += 'location LIKE ?';
-      whereArgs.add('%$locationFilter%');
-    }
-    if (dateFrom != null) {
-      if (where.isNotEmpty) where += ' AND ';
-      where += 'created_at >= ?';
-      whereArgs.add(dateFrom.toIso8601String());
-    }
-    if (dateTo != null) {
-      if (where.isNotEmpty) where += ' AND ';
-      where += 'created_at <= ?';
-      whereArgs.add(dateTo.add(const Duration(days: 1)).toIso8601String());
-    }
-
-    final maps = await db.query(
-      'inspections',
-      where: where.isNotEmpty ? where : null,
-      whereArgs: whereArgs.isNotEmpty ? whereArgs : null,
-      orderBy: 'created_at DESC',
-    );
-
-    final inspections = maps.map((m) => Inspection.fromMap(m)).toList();
-
-    for (final insp in inspections) {
-      final resultMaps = await db.query(
-        'inspection_results',
-        where: 'inspection_id = ?',
-        whereArgs: [insp.id],
-      );
-      insp.results =
-          resultMaps.map((m) => InspectionResult.fromMap(m)).toList();
-
-      final photoMaps = await db.query(
-        'inspection_photos',
-        where: 'inspection_id = ?',
-        whereArgs: [insp.id],
-      );
-      final photoBasePath = await getPhotoBasePath();
-      insp.photos = photoMaps.map((m) {
-        final photo = InspectionPhoto.fromMap(m);
-        // 전체경로/파일명 모두 → 파일명만 추출 후 현재 base path로 재조합
-        // (절대경로는 앱 재시작 시 UUID가 바뀌어 무효화되므로 항상 재조합)
-        final fileName = basename(photo.photoPath);
-        photo.photoPath = '$photoBasePath/$fileName';
-        return photo;
-      }).toList();
-    }
-
-    return inspections;
-  }
-
-  Future<Inspection?> getInspection(String id) async {
+  Future<InspectionRecord?> getInspection(String id) async {
     final db = await database;
     final maps =
         await db.query('inspections', where: 'id = ?', whereArgs: [id]);
     if (maps.isEmpty) return null;
+    final rec = InspectionRecord.fromMap(maps.first);
+    rec.photos = await _loadPhotos(id);
+    return rec;
+  }
 
-    final insp = Inspection.fromMap(maps.first);
-
-    final resultMaps = await db.query(
-      'inspection_results',
-      where: 'inspection_id = ?',
-      whereArgs: [id],
-    );
-    insp.results = resultMaps.map((m) => InspectionResult.fromMap(m)).toList();
-
-    final photoMaps = await db.query(
-      'inspection_photos',
-      where: 'inspection_id = ?',
-      whereArgs: [id],
-    );
-    final photoBasePath = await getPhotoBasePath();
-    insp.photos = photoMaps.map((m) {
-      final photo = InspectionPhoto.fromMap(m);
-      // 전체경로/파일명 모두 → 파일명만 추출 후 현재 base path로 재조합
-      // (절대경로는 앱 재시작 시 UUID가 바뀌어 무효화되므로 항상 재조합)
-      final fileName = basename(photo.photoPath);
-      photo.photoPath = '$photoBasePath/$fileName';
+  Future<List<SlotPhoto>> _loadPhotos(String inspectionId) async {
+    final db = await database;
+    final base = await getPhotoBasePath();
+    final maps = await db.query('slot_photos',
+        where: 'inspection_id = ?', whereArgs: [inspectionId]);
+    return maps.map((m) {
+      final photo = SlotPhoto.fromMap(m);
+      final fileName = photo.photoPath.split(RegExp(r'[/\\]')).last;
+      photo.photoPath = '$base/$fileName';
       return photo;
     }).toList();
-
-    return insp;
   }
 
   Future<String> saveInspection({
-    required String location,
-    required String inspector,
-    String? overallNote,
-    required DateTime date,
-    required Map<String, String?> results,
-    required Map<String, String> notes,
-    required Map<String, List<String>> photos,
+    required InspectionRecord record,
+    required Map<String, String> slotPaths,
     String? existingId,
   }) async {
     final db = await database;
-    final id = existingId ?? _uuid.v4();
-
-    // CASCADE가 SQLite 기본 비활성이므로 자식 테이블 먼저 명시적으로 삭제
-    await db.delete('inspection_photos',
-        where: 'inspection_id = ?', whereArgs: [id]);
-    await db.delete('inspection_results',
-        where: 'inspection_id = ?', whereArgs: [id]);
+    final id = existingId ?? record.id;
+    await db.delete('slot_photos', where: 'inspection_id = ?', whereArgs: [id]);
     await db.delete('inspections', where: 'id = ?', whereArgs: [id]);
 
-    await db.insert('inspections', {
-      'id': id,
-      'location': location,
-      'inspector': inspector,
-      'overall_note': overallNote,
-      'created_at': date.toIso8601String(),
-    });
+    final map = record.toMap();
+    map['id'] = id;
+    await db.insert('inspections', map);
 
-    for (final entry in results.entries) {
-      await db.insert('inspection_results', {
+    for (final entry in slotPaths.entries) {
+      final fileName = entry.value.split(RegExp(r'[/\\]')).last;
+      await db.insert('slot_photos', {
         'id': _uuid.v4(),
         'inspection_id': id,
-        'item_id': entry.key,
-        'result': entry.value,
-        'note': notes[entry.key],
+        'slot_key': entry.key,
+        'photo_path': fileName,
       });
     }
 
-    for (final entry in photos.entries) {
-      for (final path in entry.value) {
-        // 절대경로에서 파일명만 추출해 저장 (재시작 시 경로 변경 대응)
-        final fileName = basename(path);
-        await db.insert('inspection_photos', {
-          'id': _uuid.v4(),
-          'inspection_id': id,
-          'item_id': entry.key == '__overall__' ? null : entry.key,
-          'photo_path': fileName,
-        });
-      }
-    }
+    // 점검 저장 시 차량 목록에도 자동 동기화
+    await _syncVehicleFromInspection(record);
 
     return id;
   }
 
-  Future<void> deleteInspection(String id) async {
+  Future<void> _syncVehicleFromInspection(InspectionRecord rec) async {
+    if (rec.plateNo.isEmpty) return;
+    final existing = await findVehicleByPlate(rec.plateNo);
+    if (existing != null) return; // 이미 있으면 패스
+    // 차량 목록에 없으면 새로 추가
     final db = await database;
-    await db.delete('inspection_photos',
-        where: 'inspection_id = ?', whereArgs: [id]);
-    await db.delete('inspection_results',
-        where: 'inspection_id = ?', whereArgs: [id]);
-    await db.delete('inspections', where: 'id = ?', whereArgs: [id]);
+    final countMap =
+        await db.rawQuery('SELECT MAX(serial_no) as mx FROM vehicles');
+    final nextSerial = ((countMap.first['mx'] as int?) ?? 0) + 1;
+    await db.insert('vehicles', {
+      'id': _uuid.v4(),
+      'serial_no': nextSerial,
+      'plate_no': rec.plateNo,
+      'owner': rec.driverOrg,
+      'vehicle_type': rec.vehicleType,
+      'axle_count': rec.axleCount,
+      'gross_weight': rec.grossWeight,
+      'max_load': rec.maxLoad,
+      'modem_no': rec.modemNo,
+      'sensor_id': rec.sensorId,
+      'camera_id': rec.cameraId,
+    });
   }
 
-  Future<List<String>> getDistinctLocations() async {
+  Future<void> deleteInspection(String id) async {
     final db = await database;
-    final maps = await db.rawQuery(
-      'SELECT DISTINCT location FROM inspections ORDER BY location ASC',
-    );
-    return maps.map((m) => m['location'] as String).toList();
+    await db.delete('slot_photos', where: 'inspection_id = ?', whereArgs: [id]);
+    await db.delete('inspections', where: 'id = ?', whereArgs: [id]);
   }
 }

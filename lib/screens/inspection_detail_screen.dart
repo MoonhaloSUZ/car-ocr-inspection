@@ -2,12 +2,11 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:intl/intl.dart';
-import '../models/inspection.dart';
-import '../providers/template_provider.dart';
+import '../models/inspection_record.dart';
+import '../providers/inspection_provider.dart';
 import '../services/database_service.dart';
 import '../services/export_service.dart';
 import '../utils/theme.dart';
-import '../widgets/result_toggle.dart';
 import 'inspection_form_screen.dart';
 
 class InspectionDetailScreen extends StatefulWidget {
@@ -15,12 +14,12 @@ class InspectionDetailScreen extends StatefulWidget {
   const InspectionDetailScreen({super.key, required this.inspectionId});
 
   @override
-  State<InspectionDetailScreen> createState() => _InspectionDetailScreenState();
+  State<InspectionDetailScreen> createState() => _State();
 }
 
-class _InspectionDetailScreenState extends State<InspectionDetailScreen> {
+class _State extends State<InspectionDetailScreen> {
   final _db = DatabaseService();
-  Inspection? _inspection;
+  InspectionRecord? _record;
   bool _loading = true;
   bool _exporting = false;
 
@@ -31,441 +30,250 @@ class _InspectionDetailScreenState extends State<InspectionDetailScreen> {
   }
 
   Future<void> _load() async {
-    final insp = await _db.getInspection(widget.inspectionId);
-    if (insp != null) {
-      // 사진 경로를 현재 앱 Documents 절대경로로 변환
-      for (final photo in insp.photos) {
-        photo.photoPath =
-            await DatabaseService.resolvePhotoPath(photo.photoPath);
-      }
-    }
+    final rec = await _db.getInspection(widget.inspectionId);
     if (mounted)
       setState(() {
-        _inspection = insp;
+        _record = rec;
         _loading = false;
       });
   }
 
-  void _showExportSheet() {
-    final template = context.read<TemplateProvider>().categories;
-    showModalBottomSheet(
-      context: context,
-      shape: const RoundedRectangleBorder(
-          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
-      builder: (ctx) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Padding(
-              padding: EdgeInsets.all(16),
-              child: Text('내보내기',
-                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-            ),
-            ListTile(
-              leading: const Icon(Icons.picture_as_pdf, color: Colors.red),
-              title: const Text('PDF로 내보내기'),
-              subtitle: const Text('사진 포함, 공유 가능한 문서'),
-              onTap: () async {
-                Navigator.pop(ctx);
-                setState(() => _exporting = true);
-                try {
-                  await ExportService().exportPdf(_inspection!, template);
-                } catch (e) {
-                  if (mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(content: Text('PDF 내보내기 실패: $e')));
-                  }
-                } finally {
-                  if (mounted) setState(() => _exporting = false);
-                }
-              },
-            ),
-            ListTile(
-              leading: const Icon(Icons.table_chart, color: Colors.green),
-              title: const Text('Excel로 내보내기'),
-              subtitle: const Text('데이터 분석용 스프레드시트'),
-              onTap: () async {
-                Navigator.pop(ctx);
-                setState(() => _exporting = true);
-                try {
-                  await ExportService().exportExcel(_inspection!, template);
-                } catch (e) {
-                  if (mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(content: Text('Excel 내보내기 실패: $e')));
-                  }
-                } finally {
-                  if (mounted) setState(() => _exporting = false);
-                }
-              },
-            ),
-            const SizedBox(height: 8),
-          ],
-        ),
-      ),
-    );
+  Future<void> _export() async {
+    if (_record == null) return;
+    setState(() => _exporting = true);
+    try {
+      await ExportService().exportPdf(_record!);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('PDF 오류: $e')));
+      }
+    } finally {
+      if (mounted) setState(() => _exporting = false);
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     if (_loading) {
       return Scaffold(
-        appBar: AppBar(title: const Text('점검 상세')),
-        body: const Center(child: CircularProgressIndicator()),
-      );
+          appBar: AppBar(title: const Text('점검 상세')),
+          body: const Center(child: CircularProgressIndicator()));
     }
-
-    if (_inspection == null) {
+    if (_record == null) {
       return Scaffold(
-        appBar: AppBar(title: const Text('점검 상세')),
-        body: const Center(child: Text('점검 기록을 찾을 수 없습니다')),
-      );
+          appBar: AppBar(title: const Text('점검 상세')),
+          body: const Center(child: Text('기록을 찾을 수 없습니다')));
     }
 
-    final insp = _inspection!;
-    final template = context.watch<TemplateProvider>().categories;
+    final rec = _record!;
     final df = DateFormat('yyyy년 MM월 dd일 (E)', 'ko');
-    final resultMap = {for (final r in insp.results) r.itemId: r};
-    final photoMap = <String, List<InspectionPhoto>>{};
-    for (final p in insp.photos) {
-      if (p.itemId != null) {
-        photoMap.putIfAbsent(p.itemId!, () => []).add(p);
-      }
-    }
 
     return Scaffold(
       appBar: AppBar(
-        title: Text(insp.location),
+        title: Text(rec.plateNo),
         actions: [
-          if (_exporting)
-            const Padding(
-              padding: EdgeInsets.all(14),
-              child: SizedBox(
-                  width: 20,
-                  height: 20,
-                  child: CircularProgressIndicator(
-                      color: Colors.white, strokeWidth: 2)),
-            )
-          else ...[
-            IconButton(
-              icon: const Icon(Icons.edit),
-              tooltip: '수정',
-              onPressed: () => Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (_) => InspectionFormScreen(inspectionId: insp.id),
+          IconButton(
+            icon: const Icon(Icons.edit),
+            onPressed: () => Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                        builder: (_) =>
+                            InspectionFormScreen(inspectionId: rec.id)))
+                .then((_) => _load()),
+          ),
+          _exporting
+              ? const Padding(
+                  padding: EdgeInsets.all(14),
+                  child: SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(
+                          color: Colors.white, strokeWidth: 2)))
+              : IconButton(
+                  icon: const Icon(Icons.picture_as_pdf),
+                  tooltip: 'PDF 내보내기',
+                  onPressed: _export,
                 ),
-              ).then((_) => _load()),
-            ),
-            IconButton(
-              icon: const Icon(Icons.ios_share),
-              tooltip: '내보내기',
-              onPressed: _showExportSheet,
-            ),
-          ],
         ],
       ),
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
-          // Header info card
+          // 기본 정보
+          _infoCard('기본 정보', [
+            _row(
+                '점검일자',
+                rec.inspectionDate.isNotEmpty
+                    ? rec.inspectionDate
+                    : df.format(rec.createdAt)),
+            _row('운전자 소속', rec.driverOrg),
+            _row('성명', rec.driverName),
+            _row('연락처', rec.driverContact),
+          ]),
+          const SizedBox(height: 10),
+
+          // 차량 정보
+          _infoCard('차량 정보', [
+            _row('차량번호', rec.plateNo),
+            _row('차종명', rec.vehicleType),
+            _row('총중량', '${rec.grossWeight} 톤'),
+            _row('축수', '${rec.axleCount} 축'),
+            _row('최대적재량', '${rec.maxLoad} 톤'),
+          ]),
+          const SizedBox(height: 10),
+
+          // 장비 정보
+          _infoCard('장비 정보', [
+            _row('모뎀번호', rec.modemNo),
+            _row('센서ID', rec.sensorId),
+            _row('카메라ID', rec.cameraId),
+          ]),
+          const SizedBox(height: 10),
+
+          // 장착사진
           Card(
             child: Padding(
-              padding: const EdgeInsets.all(16),
+              padding: const EdgeInsets.all(14),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  _InfoRow(Icons.location_on, '점검 장소', insp.location),
-                  const SizedBox(height: 6),
-                  _InfoRow(
-                      Icons.calendar_today, '점검 일시', df.format(insp.createdAt)),
-                  if (insp.inspector.isNotEmpty) ...[
-                    const SizedBox(height: 6),
-                    _InfoRow(Icons.person, '점검자', insp.inspector),
-                  ],
+                  Row(children: [
+                    const Text('장착사진',
+                        style: TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.bold,
+                            color: AppTheme.primaryColor)),
+                    const Spacer(),
+                    Text('${rec.filledPhotoCount} / ${kPhotoSlots.length}',
+                        style: TextStyle(
+                            fontSize: 12, color: Colors.grey.shade600)),
+                  ]),
+                  const Divider(height: 14),
+                  GridView.builder(
+                    shrinkWrap: true,
+                    physics: const NeverScrollableScrollPhysics(),
+                    gridDelegate:
+                        const SliverGridDelegateWithFixedCrossAxisCount(
+                      crossAxisCount: 2,
+                      crossAxisSpacing: 8,
+                      mainAxisSpacing: 8,
+                      childAspectRatio: 1.1,
+                    ),
+                    itemCount: kPhotoSlots.length,
+                    itemBuilder: (ctx, i) {
+                      final slot = kPhotoSlots[i];
+                      final photoPath = rec.photos
+                          .where((p) => p.slotKey == slot.key)
+                          .map((p) => p.photoPath)
+                          .firstOrNull;
+                      return _PhotoTile(label: slot.label, path: photoPath);
+                    },
+                  ),
                 ],
               ),
             ),
           ),
-          const SizedBox(height: 10),
-
-          // Summary card
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text('점검 결과 요약',
-                      style: TextStyle(fontWeight: FontWeight.bold)),
-                  const SizedBox(height: 12),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceAround,
-                    children: [
-                      _SummaryItem('전체', insp.totalItems, Colors.grey.shade600),
-                      _SummaryItem('Y (양호)', insp.yCount, AppTheme.yColor),
-                      _SummaryItem('N (불량)', insp.nCount, AppTheme.nColor),
-                      _SummaryItem('NA', insp.naCount, AppTheme.naColor),
-                      if (insp.unchecked > 0)
-                        _SummaryItem('미점검', insp.unchecked, Colors.orange),
-                    ],
-                  ),
-                  const SizedBox(height: 12),
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(4),
-                    child: LinearProgressIndicator(
-                      value: insp.completionRate,
-                      backgroundColor: Colors.grey.shade200,
-                      valueColor: AlwaysStoppedAnimation<Color>(
-                        insp.completionRate == 1.0
-                            ? AppTheme.yColor
-                            : AppTheme.primaryColor,
-                      ),
-                      minHeight: 8,
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    '완료율 ${(insp.completionRate * 100).toInt()}%',
-                    style: const TextStyle(fontSize: 12, color: Colors.grey),
-                  ),
-                ],
-              ),
-            ),
-          ),
-          const SizedBox(height: 10),
-
-          // Checklist results by category
-          ...template.map((cat) {
-            final catItems = cat.items;
-            return Card(
-              margin: const EdgeInsets.only(bottom: 10),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 16, vertical: 10),
-                    decoration: BoxDecoration(
-                      color: AppTheme.primaryColor.withOpacity(0.07),
-                      borderRadius:
-                          const BorderRadius.vertical(top: Radius.circular(12)),
-                    ),
-                    child: Row(
-                      children: [
-                        Text(
-                          cat.title,
-                          style: const TextStyle(
-                              fontWeight: FontWeight.bold, fontSize: 15),
-                        ),
-                        const Spacer(),
-                        Text(
-                          '${catItems.where((i) => resultMap[i.id]?.result != null).length} / ${catItems.length}',
-                          style: TextStyle(
-                              fontSize: 12, color: Colors.grey.shade600),
-                        ),
-                      ],
-                    ),
-                  ),
-                  ...catItems.asMap().entries.map((e) {
-                    final idx = e.key;
-                    final item = e.value;
-                    final result = resultMap[item.id];
-                    final itemPhotos = photoMap[item.id] ?? [];
-
-                    return Container(
-                      decoration: BoxDecoration(
-                        border: Border(
-                          bottom: idx < catItems.length - 1
-                              ? BorderSide(color: Colors.grey.shade100)
-                              : BorderSide.none,
-                        ),
-                      ),
-                      child: Padding(
-                        padding: const EdgeInsets.fromLTRB(16, 10, 16, 10),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Row(
-                              children: [
-                                Expanded(
-                                  child: Text(item.title,
-                                      style: const TextStyle(fontSize: 14)),
-                                ),
-                                const SizedBox(width: 8),
-                                ResultBadge(result: result?.result),
-                              ],
-                            ),
-                            if (result?.note != null &&
-                                result!.note!.isNotEmpty) ...[
-                              const SizedBox(height: 6),
-                              Container(
-                                padding: const EdgeInsets.all(8),
-                                decoration: BoxDecoration(
-                                  color: Colors.grey.shade50,
-                                  borderRadius: BorderRadius.circular(6),
-                                  border:
-                                      Border.all(color: Colors.grey.shade200),
-                                ),
-                                child: Row(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Icon(Icons.notes,
-                                        size: 14, color: Colors.grey.shade500),
-                                    const SizedBox(width: 6),
-                                    Expanded(
-                                      child: Text(
-                                        result.note!,
-                                        style: TextStyle(
-                                            fontSize: 12,
-                                            color: Colors.grey.shade700),
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            ],
-                            if (itemPhotos.isNotEmpty) ...[
-                              const SizedBox(height: 8),
-                              _PhotoRow(photos: itemPhotos),
-                            ],
-                          ],
-                        ),
-                      ),
-                    );
-                  }),
-                ],
-              ),
-            );
-          }),
-
-          // Overall note
-          if (insp.overallNote != null && insp.overallNote!.isNotEmpty)
-            Card(
-              margin: const EdgeInsets.only(bottom: 10),
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text('종합 의견',
-                        style: TextStyle(fontWeight: FontWeight.bold)),
-                    const SizedBox(height: 8),
-                    Text(insp.overallNote!,
-                        style: const TextStyle(fontSize: 14)),
-                  ],
-                ),
-              ),
-            ),
-
           const SizedBox(height: 20),
         ],
       ),
     );
   }
+
+  Widget _infoCard(String title, List<Widget> rows) => Card(
+        child: Padding(
+          padding: const EdgeInsets.all(14),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(title,
+                  style: const TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.bold,
+                      color: AppTheme.primaryColor)),
+              const Divider(height: 14),
+              ...rows,
+            ],
+          ),
+        ),
+      );
+
+  Widget _row(String label, String value) => Padding(
+        padding: const EdgeInsets.symmetric(vertical: 3),
+        child: Row(children: [
+          SizedBox(
+              width: 90,
+              child: Text(label,
+                  style: TextStyle(fontSize: 12, color: Colors.grey.shade600))),
+          Expanded(
+              child: Text(value.isEmpty ? '-' : value,
+                  style: const TextStyle(fontSize: 13))),
+        ]),
+      );
 }
 
-class _InfoRow extends StatelessWidget {
-  final IconData icon;
+class _PhotoTile extends StatelessWidget {
   final String label;
-  final String value;
-
-  const _InfoRow(this.icon, this.label, this.value);
+  final String? path;
+  const _PhotoTile({required this.label, this.path});
 
   @override
   Widget build(BuildContext context) {
-    return Row(
-      children: [
-        Icon(icon, size: 16, color: AppTheme.primaryColor),
-        const SizedBox(width: 8),
-        Text('$label: ',
-            style: const TextStyle(fontSize: 13, color: Colors.grey)),
+    final hasPhoto = path != null && File(path!).existsSync();
+    return GestureDetector(
+      onTap: hasPhoto
+          ? () => Navigator.push(
+              context,
+              MaterialPageRoute(
+                  builder: (_) => _FullPhoto(path: path!, label: label)))
+          : null,
+      child: Column(children: [
         Expanded(
-          child: Text(value,
-              style:
-                  const TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
+          child: Container(
+            decoration: BoxDecoration(
+              color: Colors.grey.shade100,
+              border: Border.all(
+                  color: hasPhoto
+                      ? AppTheme.primaryColor.withOpacity(0.4)
+                      : Colors.grey.shade300),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: hasPhoto
+                ? ClipRRect(
+                    borderRadius: BorderRadius.circular(7),
+                    child: Image.file(File(path!),
+                        fit: BoxFit.cover, width: double.infinity))
+                : Center(
+                    child: Icon(Icons.photo_camera_outlined,
+                        color: Colors.grey.shade300, size: 28)),
+          ),
         ),
-      ],
-    );
-  }
-}
-
-class _SummaryItem extends StatelessWidget {
-  final String label;
-  final int count;
-  final Color color;
-
-  const _SummaryItem(this.label, this.count, this.color);
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      children: [
-        Text(
-          '$count',
-          style: TextStyle(
-              fontSize: 22, fontWeight: FontWeight.bold, color: color),
-        ),
+        const SizedBox(height: 3),
         Text(label,
-            style: TextStyle(fontSize: 10, color: Colors.grey.shade600)),
-      ],
+            textAlign: TextAlign.center,
+            style: TextStyle(
+                fontSize: 10,
+                color:
+                    hasPhoto ? AppTheme.primaryColor : Colors.grey.shade500)),
+      ]),
     );
   }
 }
 
-class _PhotoRow extends StatelessWidget {
-  final List<InspectionPhoto> photos;
-  const _PhotoRow({required this.photos});
+class _FullPhoto extends StatelessWidget {
+  final String path;
+  final String label;
+  const _FullPhoto({required this.path, required this.label});
 
   @override
-  Widget build(BuildContext context) {
-    return Wrap(
-      spacing: 6,
-      runSpacing: 6,
-      children: photos.map((p) {
-        return GestureDetector(
-          onTap: () => Navigator.push(
-            context,
-            MaterialPageRoute(
-              builder: (_) => _PhotoViewer(imagePath: p.photoPath),
-            ),
-          ),
-          child: ClipRRect(
-            borderRadius: BorderRadius.circular(6),
-            child: Image.file(
-              File(p.photoPath),
-              width: 72,
-              height: 72,
-              fit: BoxFit.cover,
-              errorBuilder: (_, __, ___) => Container(
-                width: 72,
-                height: 72,
-                color: Colors.grey.shade200,
-                child: const Icon(Icons.broken_image, color: Colors.grey),
-              ),
-            ),
-          ),
-        );
-      }).toList(),
-    );
-  }
-}
-
-class _PhotoViewer extends StatelessWidget {
-  final String imagePath;
-  const _PhotoViewer({required this.imagePath});
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: Colors.black,
-      appBar:
-          AppBar(backgroundColor: Colors.black, foregroundColor: Colors.white),
-      body: Center(
-        child: InteractiveViewer(
-          child: Image.file(File(imagePath), fit: BoxFit.contain),
+  Widget build(BuildContext context) => Scaffold(
+        backgroundColor: Colors.black,
+        appBar: AppBar(
+            backgroundColor: Colors.black,
+            foregroundColor: Colors.white,
+            title: Text(label)),
+        body: InteractiveViewer(
+          child: Center(child: Image.file(File(path), fit: BoxFit.contain)),
         ),
-      ),
-    );
-  }
+      );
 }

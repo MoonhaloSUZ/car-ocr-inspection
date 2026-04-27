@@ -1,7 +1,7 @@
-name: field_inspection
-description: 현장점검 점검표 앱
+name: livestock_inspection
+description: 가축분뇨 검증장비 정기점검표
 publish_to: 'none'
-version: 1.0.0+1
+version: 2.0.0+1
 
 environment:
   sdk: '>=3.0.0 <4.0.0'
@@ -18,10 +18,9 @@ dependencies:
   intl: ^0.19.0
   pdf: ^3.10.8
   printing: ^5.12.0
-  excel: ^4.0.6
   share_plus: ^9.0.0
   uuid: ^4.3.3
-  flutter_slidable: ^3.1.0
+  google_mlkit_text_recognition: ^0.11.0
 
 dev_dependencies:
   flutter_test:
@@ -31,4 +30,5 @@ dev_dependencies:
 flutter:
   uses-material-design: true
   assets:
-    - assets/fonts/
+    - assets/fonts/NotoSansKR-Regular.ttf
+    - assets/fonts/NotoSansKR-Bold.ttf

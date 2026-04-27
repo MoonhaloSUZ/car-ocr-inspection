@@ -1,527 +1,570 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:intl/intl.dart';
-import '../models/checklist_template.dart';
-import '../providers/template_provider.dart';
+import 'package:uuid/uuid.dart';
+import '../models/inspection_record.dart';
+import '../providers/vehicle_provider.dart';
 import '../services/database_service.dart';
+import '../services/ocr_service.dart';
 import '../utils/theme.dart';
-import '../widgets/result_toggle.dart';
-import '../widgets/photo_picker_widget.dart';
+import '../widgets/ocr_input_field.dart';
+import '../widgets/photo_slot_widget.dart';
 
 class InspectionFormScreen extends StatefulWidget {
-  final String? inspectionId; // null = new inspection
-
+  final String? inspectionId;
   const InspectionFormScreen({super.key, this.inspectionId});
 
   @override
   State<InspectionFormScreen> createState() => _InspectionFormScreenState();
 }
 
-class _InspectionFormScreenState extends State<InspectionFormScreen> {
+class _InspectionFormScreenState extends State<InspectionFormScreen>
+    with SingleTickerProviderStateMixin {
   final _db = DatabaseService();
-  final _locationCtrl = TextEditingController();
-  final _inspectorCtrl = TextEditingController();
-  final _overallNoteCtrl = TextEditingController();
-  DateTime _date = DateTime.now();
-  final Map<String, String?> _results = {};
-  final Map<String, TextEditingController> _noteCtrl = {};
-  final Map<String, List<String>> _photos = {};
-  final Set<String> _expandedCategories = {};
+  late TabController _tab;
+
+  // ── 컨트롤러 ──
+  final _mgmtNoCtrl = TextEditingController();
+  final _driverOrgCtrl = TextEditingController();
+  final _driverNameCtrl = TextEditingController();
+  final _driverContactCtrl = TextEditingController();
+  final _plateCtrl = TextEditingController();
+  final _vehicleTypeCtrl = TextEditingController();
+  final _grossWeightCtrl = TextEditingController();
+  final _axleCtrl = TextEditingController();
+  final _maxLoadCtrl = TextEditingController();
+  final _modemCtrl = TextEditingController();
+  final _sensorCtrl = TextEditingController();
+  final _cameraCtrl = TextEditingController();
+
+  // 중량센서(A)
+  final _emptyGWCtrl = TextEditingController();
+  final _emptyERCtrl = TextEditingController();
+  final _fullGWCtrl = TextEditingController();
+  final _fullERCtrl = TextEditingController();
+  final List<TextEditingController> _chCtrls =
+      List.generate(8, (_) => TextEditingController());
+
+  // 계근대(B)
+  final List<TextEditingController> _scaleEmptyCtrl =
+      List.generate(5, (_) => TextEditingController());
+  final List<TextEditingController> _scaleFullCtrl =
+      List.generate(5, (_) => TextEditingController());
+  String _scaleType = '';
+
+  DateTime _inspDate = DateTime.now();
+  Map<String, String> _slotPaths = {};
   bool _saving = false;
   bool _loading = true;
+  String? _existingId;
+
+  List<TextEditingController> get _allControllers => [
+        _mgmtNoCtrl,
+        _driverOrgCtrl,
+        _driverNameCtrl,
+        _driverContactCtrl,
+        _plateCtrl,
+        _vehicleTypeCtrl,
+        _grossWeightCtrl,
+        _axleCtrl,
+        _maxLoadCtrl,
+        _modemCtrl,
+        _sensorCtrl,
+        _cameraCtrl,
+        _emptyGWCtrl,
+        _emptyERCtrl,
+        _fullGWCtrl,
+        _fullERCtrl,
+        ..._chCtrls,
+        ..._scaleEmptyCtrl,
+        ..._scaleFullCtrl,
+      ];
 
   @override
   void initState() {
     super.initState();
-    _loadData();
+    _tab = TabController(length: 3, vsync: this);
+    _loadExisting();
   }
 
   @override
   void dispose() {
-    _locationCtrl.dispose();
-    _inspectorCtrl.dispose();
-    _overallNoteCtrl.dispose();
-    for (final c in _noteCtrl.values) {
-      c.dispose();
-    }
+    _tab.dispose();
+    for (final c in _allControllers) c.dispose();
     super.dispose();
   }
 
-  Future<void> _loadData() async {
-    // Provider가 아직 로딩 중일 수 있으므로 DB에서 직접 가져옴
-    final template = await _db.getTemplate();
-
-    // Initialize result + note controllers for all items
-    for (final cat in template) {
-      for (final item in cat.items) {
-        _results[item.id] = null;
-        _noteCtrl[item.id] = TextEditingController();
-        _photos[item.id] = [];
-      }
-      _expandedCategories.add(cat.id);
-    }
-
-    // Load existing inspection if editing
+  Future<void> _loadExisting() async {
     if (widget.inspectionId != null) {
-      final insp = await _db.getInspection(widget.inspectionId!);
-      if (insp != null && mounted) {
-        _locationCtrl.text = insp.location;
-        _inspectorCtrl.text = insp.inspector;
-        _overallNoteCtrl.text = insp.overallNote ?? '';
-        _date = insp.createdAt;
-
-        for (final r in insp.results) {
-          _results[r.itemId] = r.result;
-          _noteCtrl[r.itemId]?.text = r.note ?? '';
+      final rec = await _db.getInspection(widget.inspectionId!);
+      if (rec != null && mounted) {
+        _existingId = rec.id;
+        _mgmtNoCtrl.text = rec.mgmtNo;
+        _driverOrgCtrl.text = rec.driverOrg;
+        _driverNameCtrl.text = rec.driverName;
+        _driverContactCtrl.text = rec.driverContact;
+        _plateCtrl.text = rec.plateNo;
+        _vehicleTypeCtrl.text = rec.vehicleType;
+        _grossWeightCtrl.text = rec.grossWeight;
+        _axleCtrl.text = rec.axleCount;
+        _maxLoadCtrl.text = rec.maxLoad;
+        _modemCtrl.text = rec.modemNo;
+        _sensorCtrl.text = rec.sensorId;
+        _cameraCtrl.text = rec.cameraId;
+        _emptyGWCtrl.text = rec.emptyGrossWeight;
+        _emptyERCtrl.text = rec.emptyErrorRate;
+        _fullGWCtrl.text = rec.fullGrossWeight;
+        _fullERCtrl.text = rec.fullErrorRate;
+        final chs = [
+          rec.ch1,
+          rec.ch2,
+          rec.ch3,
+          rec.ch4,
+          rec.ch5,
+          rec.ch6,
+          rec.ch7,
+          rec.ch8
+        ];
+        for (int i = 0; i < 8; i++) _chCtrls[i].text = chs[i];
+        final se = [
+          rec.scaleEmptyAx1,
+          rec.scaleEmptyAx2,
+          rec.scaleEmptyAx3,
+          rec.scaleEmptyAx4,
+          rec.scaleEmptyTotal
+        ];
+        final sf = [
+          rec.scaleFullAx1,
+          rec.scaleFullAx2,
+          rec.scaleFullAx3,
+          rec.scaleFullAx4,
+          rec.scaleFullTotal
+        ];
+        for (int i = 0; i < 5; i++) {
+          _scaleEmptyCtrl[i].text = se[i];
+          _scaleFullCtrl[i].text = sf[i];
         }
-        for (final p in insp.photos) {
-          if (p.itemId != null) {
-            final fullPath =
-                await DatabaseService.resolvePhotoPath(p.photoPath);
-            _photos[p.itemId!] = [...(_photos[p.itemId!] ?? []), fullPath];
-          }
+        _scaleType = rec.scaleType;
+        if (rec.inspectionDate.isNotEmpty) {
+          try {
+            _inspDate = DateFormat('yyyy-MM-dd').parse(rec.inspectionDate);
+          } catch (_) {}
         }
+        _slotPaths = {for (final p in rec.photos) p.slotKey: p.photoPath};
       }
     }
+    if (mounted) setState(() => _loading = false);
+  }
 
-    setState(() => _loading = false);
+  Future<void> _onPlateChanged(String val) async {
+    if (val.length < 6) return;
+    final vehicle = await context.read<VehicleProvider>().findByPlate(val);
+    if (vehicle != null && mounted) {
+      final confirm = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('차량 정보 자동완성'),
+          content: Text('차량번호 ${vehicle.plateNo}\n\n'
+              '소속: ${vehicle.owner}\n'
+              '차종명: ${vehicle.vehicleType}\n'
+              '총중량: ${vehicle.grossWeight}톤  축수: ${vehicle.axleCount}축\n'
+              '최대적재량: ${vehicle.maxLoad}톤\n'
+              '모뎀번호: ${vehicle.modemNo}\n'
+              '센서ID: ${vehicle.sensorId}  카메라ID: ${vehicle.cameraId}\n\n'
+              '자동으로 입력할까요?'),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('아니오')),
+            ElevatedButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('입력')),
+          ],
+        ),
+      );
+      if (confirm == true && mounted) {
+        setState(() {
+          _driverOrgCtrl.text = vehicle.owner;
+          _vehicleTypeCtrl.text = vehicle.vehicleType;
+          _grossWeightCtrl.text = vehicle.grossWeight;
+          _axleCtrl.text = vehicle.axleCount;
+          _maxLoadCtrl.text = vehicle.maxLoad;
+          _modemCtrl.text = vehicle.modemNo;
+          _sensorCtrl.text = vehicle.sensorId;
+          _cameraCtrl.text = vehicle.cameraId;
+        });
+      }
+    }
   }
 
   Future<void> _pickDate() async {
     final picked = await showDatePicker(
-      context: context,
-      initialDate: _date,
-      firstDate: DateTime(2020),
-      lastDate: DateTime(2030),
-    );
-    if (picked != null) setState(() => _date = picked);
+        context: context,
+        initialDate: _inspDate,
+        firstDate: DateTime(2020),
+        lastDate: DateTime(2030));
+    if (picked != null) setState(() => _inspDate = picked);
   }
 
   Future<void> _save() async {
-    if (_locationCtrl.text.trim().isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('점검 장소를 입력해주세요')),
-      );
+    if (_plateCtrl.text.trim().isEmpty) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('차량번호를 입력해주세요')));
       return;
     }
-
     setState(() => _saving = true);
 
-    final notes = <String, String>{};
-    for (final entry in _noteCtrl.entries) {
-      notes[entry.key] = entry.value.text;
-    }
+    final record = InspectionRecord(
+      id: _existingId ?? const Uuid().v4(),
+      createdAt: DateTime.now(),
+      mgmtNo: _mgmtNoCtrl.text.trim(),
+      inspectionDate: DateFormat('yyyy-MM-dd').format(_inspDate),
+      driverOrg: _driverOrgCtrl.text.trim(),
+      driverName: _driverNameCtrl.text.trim(),
+      driverContact: _driverContactCtrl.text.trim(),
+      plateNo: _plateCtrl.text.trim(),
+      vehicleType: _vehicleTypeCtrl.text.trim(),
+      grossWeight: _grossWeightCtrl.text.trim(),
+      axleCount: _axleCtrl.text.trim(),
+      maxLoad: _maxLoadCtrl.text.trim(),
+      modemNo: _modemCtrl.text.trim(),
+      sensorId: _sensorCtrl.text.trim(),
+      cameraId: _cameraCtrl.text.trim(),
+      emptyGrossWeight: _emptyGWCtrl.text.trim(),
+      emptyErrorRate: _emptyERCtrl.text.trim(),
+      fullGrossWeight: _fullGWCtrl.text.trim(),
+      fullErrorRate: _fullERCtrl.text.trim(),
+      ch1: _chCtrls[0].text,
+      ch2: _chCtrls[1].text,
+      ch3: _chCtrls[2].text,
+      ch4: _chCtrls[3].text,
+      ch5: _chCtrls[4].text,
+      ch6: _chCtrls[5].text,
+      ch7: _chCtrls[6].text,
+      ch8: _chCtrls[7].text,
+      scaleEmptyAx1: _scaleEmptyCtrl[0].text,
+      scaleEmptyAx2: _scaleEmptyCtrl[1].text,
+      scaleEmptyAx3: _scaleEmptyCtrl[2].text,
+      scaleEmptyAx4: _scaleEmptyCtrl[3].text,
+      scaleEmptyTotal: _scaleEmptyCtrl[4].text,
+      scaleFullAx1: _scaleFullCtrl[0].text,
+      scaleFullAx2: _scaleFullCtrl[1].text,
+      scaleFullAx3: _scaleFullCtrl[2].text,
+      scaleFullAx4: _scaleFullCtrl[3].text,
+      scaleFullTotal: _scaleFullCtrl[4].text,
+      scaleType: _scaleType,
+    );
 
     await _db.saveInspection(
-      location: _locationCtrl.text.trim(),
-      inspector: _inspectorCtrl.text.trim(),
-      overallNote: _overallNoteCtrl.text.isEmpty ? null : _overallNoteCtrl.text,
-      date: _date,
-      results: _results,
-      notes: notes,
-      photos: _photos,
-      existingId: widget.inspectionId,
-    );
+        record: record, slotPaths: _slotPaths, existingId: _existingId);
 
     if (mounted) {
       setState(() => _saving = false);
-      Navigator.pop(context);
+      Navigator.pop(context, true);
     }
   }
 
-  int _getCategoryProgress(ChecklistCategory cat) =>
-      cat.items.where((i) => _results[i.id] != null).length;
-
   @override
   Widget build(BuildContext context) {
-    final template = context.watch<TemplateProvider>().categories;
-    final df = DateFormat('yyyy년 MM월 dd일 (E)', 'ko');
-
     if (_loading) {
       return Scaffold(
-        appBar:
-            AppBar(title: Text(widget.inspectionId == null ? '새 점검' : '점검 수정')),
-        body: const Center(child: CircularProgressIndicator()),
-      );
+          appBar: AppBar(title: const Text('새 점검')),
+          body: const Center(child: CircularProgressIndicator()));
     }
-
-    final totalItems = template.fold(0, (sum, cat) => sum + cat.items.length);
-    final checkedItems = _results.values.where((v) => v != null).length;
-
+    final df = DateFormat('yyyy년 MM월 dd일 (E)', 'ko');
     return Scaffold(
       appBar: AppBar(
         title: Text(widget.inspectionId == null ? '새 점검' : '점검 수정'),
-        actions: [
-          if (_saving)
-            const Padding(
-              padding: EdgeInsets.all(14),
-              child: SizedBox(
-                  width: 20,
-                  height: 20,
-                  child: CircularProgressIndicator(
-                      color: Colors.white, strokeWidth: 2)),
-            )
-          else
-            TextButton.icon(
-              onPressed: _save,
-              icon: const Icon(Icons.save, color: Colors.white, size: 20),
-              label: const Text('저장', style: TextStyle(color: Colors.white)),
-            ),
-        ],
-      ),
-      body: Column(
-        children: [
-          // Progress bar
-          LinearProgressIndicator(
-            value: totalItems > 0 ? checkedItems / totalItems : 0,
-            backgroundColor: Colors.grey.shade200,
-            valueColor:
-                const AlwaysStoppedAnimation<Color>(AppTheme.primaryColor),
-            minHeight: 4,
-          ),
-          Expanded(
-            child: ListView(
-              padding: const EdgeInsets.all(16),
-              children: [
-                // Header card
-                Card(
-                  child: Padding(
-                    padding: const EdgeInsets.all(16),
-                    child: Column(
-                      children: [
-                        // Date picker
-                        InkWell(
-                          onTap: _pickDate,
-                          borderRadius: BorderRadius.circular(8),
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 12, vertical: 10),
-                            decoration: BoxDecoration(
-                              border: Border.all(color: Colors.grey.shade300),
-                              borderRadius: BorderRadius.circular(8),
-                              color: Colors.white,
-                            ),
-                            child: Row(
-                              children: [
-                                const Icon(Icons.calendar_today,
-                                    size: 18, color: AppTheme.primaryColor),
-                                const SizedBox(width: 8),
-                                Expanded(
-                                  child: Text(df.format(_date),
-                                      style: const TextStyle(fontSize: 14)),
-                                ),
-                                Icon(Icons.arrow_drop_down,
-                                    color: Colors.grey.shade400),
-                              ],
-                            ),
-                          ),
-                        ),
-                        const SizedBox(height: 10),
-                        TextField(
-                          controller: _locationCtrl,
-                          decoration: const InputDecoration(
-                            labelText: '점검 장소 *',
-                            prefixIcon:
-                                Icon(Icons.location_on_outlined, size: 18),
-                          ),
-                        ),
-                        const SizedBox(height: 10),
-                        TextField(
-                          controller: _inspectorCtrl,
-                          decoration: const InputDecoration(
-                            labelText: '점검자',
-                            prefixIcon: Icon(Icons.person_outline, size: 18),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 12),
-
-                // Checklist categories
-                ...template.map((cat) {
-                  final progress = _getCategoryProgress(cat);
-                  final total = cat.items.length;
-                  final isExpanded = _expandedCategories.contains(cat.id);
-
-                  return Card(
-                    margin: const EdgeInsets.only(bottom: 10),
-                    child: Column(
-                      children: [
-                        // Category header
-                        InkWell(
-                          onTap: () => setState(() {
-                            if (isExpanded) {
-                              _expandedCategories.remove(cat.id);
-                            } else {
-                              _expandedCategories.add(cat.id);
-                            }
-                          }),
-                          borderRadius: const BorderRadius.vertical(
-                              top: Radius.circular(12)),
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 16, vertical: 12),
-                            decoration: BoxDecoration(
-                              color: AppTheme.primaryColor.withOpacity(0.07),
-                              borderRadius: BorderRadius.vertical(
-                                top: const Radius.circular(12),
-                                bottom: isExpanded
-                                    ? Radius.zero
-                                    : const Radius.circular(12),
-                              ),
-                            ),
-                            child: Row(
-                              children: [
-                                Expanded(
-                                  child: Text(
-                                    cat.title,
-                                    style: const TextStyle(
-                                      fontWeight: FontWeight.bold,
-                                      fontSize: 15,
-                                    ),
-                                  ),
-                                ),
-                                Text(
-                                  '$progress / $total',
-                                  style: TextStyle(
-                                    fontSize: 12,
-                                    color: progress == total
-                                        ? AppTheme.yColor
-                                        : Colors.grey.shade600,
-                                    fontWeight: FontWeight.w600,
-                                  ),
-                                ),
-                                const SizedBox(width: 8),
-                                Icon(
-                                  isExpanded
-                                      ? Icons.keyboard_arrow_up
-                                      : Icons.keyboard_arrow_down,
-                                  color: Colors.grey.shade600,
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
-
-                        // Items
-                        if (isExpanded)
-                          ...cat.items.asMap().entries.map((e) {
-                            final idx = e.key;
-                            final item = e.value;
-                            final isLast = idx == cat.items.length - 1;
-
-                            return _InspectionItemTile(
-                              item: item,
-                              result: _results[item.id],
-                              noteController:
-                                  _noteCtrl[item.id] ?? TextEditingController(),
-                              photos: _photos[item.id] ?? [],
-                              isLast: isLast,
-                              onResultChanged: (v) =>
-                                  setState(() => _results[item.id] = v),
-                              onPhotosChanged: (paths) =>
-                                  setState(() => _photos[item.id] = paths),
-                            );
-                          }),
-                      ],
-                    ),
-                  );
-                }),
-
-                // Overall note
-                Card(
-                  margin: const EdgeInsets.only(bottom: 10),
-                  child: Padding(
-                    padding: const EdgeInsets.all(16),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Text('종합 의견',
-                            style: TextStyle(fontWeight: FontWeight.bold)),
-                        const SizedBox(height: 8),
-                        TextField(
-                          controller: _overallNoteCtrl,
-                          maxLines: 4,
-                          decoration: const InputDecoration(
-                            hintText: '종합적인 점검 의견을 입력하세요 (선택)',
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 80),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _InspectionItemTile extends StatefulWidget {
-  final ChecklistItem item;
-  final String? result;
-  final TextEditingController noteController;
-  final List<String> photos;
-  final bool isLast;
-  final ValueChanged<String?> onResultChanged;
-  final ValueChanged<List<String>> onPhotosChanged;
-
-  const _InspectionItemTile({
-    required this.item,
-    required this.result,
-    required this.noteController,
-    required this.photos,
-    required this.isLast,
-    required this.onResultChanged,
-    required this.onPhotosChanged,
-  });
-
-  @override
-  State<_InspectionItemTile> createState() => _InspectionItemTileState();
-}
-
-class _InspectionItemTileState extends State<_InspectionItemTile> {
-  bool _showNote = false;
-  bool _showPhotos = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _showNote = widget.noteController.text.isNotEmpty;
-    _showPhotos = widget.photos.isNotEmpty;
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      decoration: BoxDecoration(
-        border: Border(
-          bottom: widget.isLast
-              ? BorderSide.none
-              : BorderSide(color: Colors.grey.shade100),
-        ),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 10, 12, 10),
-            child: Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    widget.item.title,
-                    style: const TextStyle(fontSize: 14),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                ResultToggle(
-                  value: widget.result,
-                  onChanged: widget.onResultChanged,
-                ),
-                const SizedBox(width: 6),
-                // Note & photo toggles
-                _IconToggle(
-                  icon: Icons.edit_note,
-                  active: _showNote || widget.noteController.text.isNotEmpty,
-                  tooltip: '특이사항',
-                  onTap: () => setState(() => _showNote = !_showNote),
-                ),
-                _IconToggle(
-                  icon: Icons.photo_camera_outlined,
-                  active: _showPhotos || widget.photos.isNotEmpty,
-                  tooltip: '사진',
-                  badge: widget.photos.isNotEmpty ? widget.photos.length : null,
-                  onTap: () => setState(() => _showPhotos = !_showPhotos),
-                ),
-              ],
-            ),
-          ),
-          if (_showNote)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
-              child: TextField(
-                controller: widget.noteController,
-                maxLines: 2,
-                style: const TextStyle(fontSize: 13),
-                decoration: const InputDecoration(
-                  hintText: '특이사항 입력...',
-                  hintStyle: TextStyle(fontSize: 13),
-                ),
-              ),
-            ),
-          if (_showPhotos)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
-              child: PhotoPickerWidget(
-                photoPaths: widget.photos,
-                onChanged: widget.onPhotosChanged,
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-}
-
-class _IconToggle extends StatelessWidget {
-  final IconData icon;
-  final bool active;
-  final String tooltip;
-  final int? badge;
-  final VoidCallback onTap;
-
-  const _IconToggle({
-    required this.icon,
-    required this.active,
-    required this.tooltip,
-    required this.onTap,
-    this.badge,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Tooltip(
-      message: tooltip,
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(6),
-        child: Stack(
-          clipBehavior: Clip.none,
-          children: [
-            Padding(
-              padding: const EdgeInsets.all(6),
-              child: Icon(
-                icon,
-                size: 20,
-                color: active ? AppTheme.primaryColor : Colors.grey.shade400,
-              ),
-            ),
-            if (badge != null)
-              Positioned(
-                right: 2,
-                top: 2,
-                child: Container(
-                  width: 14,
-                  height: 14,
-                  decoration: const BoxDecoration(
-                    color: AppTheme.primaryColor,
-                    shape: BoxShape.circle,
-                  ),
-                  alignment: Alignment.center,
-                  child: Text(
-                    '$badge',
-                    style: const TextStyle(color: Colors.white, fontSize: 9),
-                  ),
-                ),
-              ),
+        bottom: TabBar(
+          controller: _tab,
+          labelColor: Colors.white,
+          unselectedLabelColor: Colors.white70,
+          indicatorColor: Colors.white,
+          tabs: const [
+            Tab(text: '기본 정보'),
+            Tab(text: '계측 데이터'),
+            Tab(text: '장착 사진'),
           ],
         ),
+        actions: [
+          _saving
+              ? const Padding(
+                  padding: EdgeInsets.all(14),
+                  child: SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(
+                          color: Colors.white, strokeWidth: 2)))
+              : TextButton.icon(
+                  onPressed: _save,
+                  icon: const Icon(Icons.save, color: Colors.white, size: 18),
+                  label:
+                      const Text('저장', style: TextStyle(color: Colors.white))),
+        ],
+      ),
+      body: TabBarView(controller: _tab, children: [
+        // ── Tab 1: 기본 정보 ──────────────────────────────────────
+        ListView(padding: const EdgeInsets.all(16), children: [
+          Card(
+              child: ListTile(
+            leading:
+                const Icon(Icons.calendar_today, color: AppTheme.primaryColor),
+            title: Text(df.format(_inspDate),
+                style: const TextStyle(fontSize: 14)),
+            trailing: const Icon(Icons.arrow_drop_down),
+            onTap: _pickDate,
+          )),
+          const SizedBox(height: 10),
+          _section('점검 정보', [
+            OcrInputField(
+                label: '관리번호',
+                controller: _mgmtNoCtrl,
+                fieldType: OcrFieldType.general,
+                hint: '관리번호 입력'),
+          ]),
+          const SizedBox(height: 10),
+          _section('운전자 정보', [
+            OcrInputField(
+                label: '소속',
+                controller: _driverOrgCtrl,
+                fieldType: OcrFieldType.general),
+            const SizedBox(height: 10),
+            Row(children: [
+              Expanded(
+                  child: OcrInputField(
+                      label: '성명',
+                      controller: _driverNameCtrl,
+                      fieldType: OcrFieldType.general)),
+              const SizedBox(width: 10),
+              Expanded(
+                  child: OcrInputField(
+                      label: '연락처',
+                      controller: _driverContactCtrl,
+                      fieldType: OcrFieldType.modemNo,
+                      hint: '010-0000-0000')),
+            ]),
+          ]),
+          const SizedBox(height: 10),
+          _section('차량 정보', [
+            OcrInputField(
+                label: '차량번호',
+                controller: _plateCtrl,
+                fieldType: OcrFieldType.plateNo,
+                required: true,
+                hint: '예) 86누0773',
+                onChanged: _onPlateChanged),
+            const SizedBox(height: 10),
+            Row(children: [
+              Expanded(
+                  child: OcrInputField(
+                      label: '차종명',
+                      controller: _vehicleTypeCtrl,
+                      fieldType: OcrFieldType.general)),
+              const SizedBox(width: 10),
+              Expanded(
+                  child: OcrInputField(
+                      label: '축수',
+                      controller: _axleCtrl,
+                      fieldType: OcrFieldType.general,
+                      hint: '예) 3')),
+            ]),
+            const SizedBox(height: 10),
+            Row(children: [
+              Expanded(
+                  child: OcrInputField(
+                      label: '총중량(톤)',
+                      controller: _grossWeightCtrl,
+                      fieldType: OcrFieldType.general)),
+              const SizedBox(width: 10),
+              Expanded(
+                  child: OcrInputField(
+                      label: '최대적재량(톤)',
+                      controller: _maxLoadCtrl,
+                      fieldType: OcrFieldType.general)),
+            ]),
+          ]),
+          const SizedBox(height: 10),
+          _section('장비 정보', [
+            OcrInputField(
+                label: '통합단말기 모뎀번호',
+                controller: _modemCtrl,
+                fieldType: OcrFieldType.modemNo,
+                hint: '예) 012-3328-8152'),
+            const SizedBox(height: 10),
+            OcrInputField(
+                label: '중량센서 ID',
+                controller: _sensorCtrl,
+                fieldType: OcrFieldType.sensorId,
+                hint: '예) RLS21-008'),
+            const SizedBox(height: 10),
+            OcrInputField(
+                label: 'IP카메라 ID',
+                controller: _cameraCtrl,
+                fieldType: OcrFieldType.cameraId,
+                hint: '예) CA21-008'),
+          ]),
+          const SizedBox(height: 80),
+        ]),
+
+        // ── Tab 2: 계측 데이터 ────────────────────────────────────
+        ListView(padding: const EdgeInsets.all(16), children: [
+          _section('중량센서(A) — 공차 정보', [
+            Row(children: [
+              Expanded(child: _numField('공차 총중량', _emptyGWCtrl, hint: 'kg')),
+              const SizedBox(width: 10),
+              Expanded(child: _numField('공차 오차율(%)', _emptyERCtrl, hint: '%')),
+            ]),
+          ]),
+          const SizedBox(height: 10),
+          _section('중량센서(A) — 만차 정보', [
+            Row(children: [
+              Expanded(child: _numField('만차 총중량', _fullGWCtrl, hint: 'kg')),
+              const SizedBox(width: 10),
+              Expanded(child: _numField('만차 오차율(%)', _fullERCtrl, hint: '%')),
+            ]),
+          ]),
+          const SizedBox(height: 10),
+          _section('공만차편차 신호 (CH1 ~ CH8)', [
+            const SizedBox(height: 4),
+            GridView.builder(
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                  crossAxisCount: 4,
+                  crossAxisSpacing: 8,
+                  mainAxisSpacing: 8,
+                  childAspectRatio: 2.8),
+              itemCount: 8,
+              itemBuilder: (ctx, i) => _numField('CH${i + 1}', _chCtrls[i]),
+            ),
+          ]),
+          const SizedBox(height: 10),
+          _section('계근대(B) — 공차 축중량', [
+            Row(children: [
+              for (int i = 0; i < 4; i++) ...[
+                Expanded(
+                    child:
+                        _numField('${i + 1}축', _scaleEmptyCtrl[i], hint: 'kg')),
+                if (i < 3) const SizedBox(width: 6),
+              ],
+            ]),
+            const SizedBox(height: 8),
+            _numField('공차 총중량(kg)', _scaleEmptyCtrl[4]),
+          ]),
+          const SizedBox(height: 10),
+          _section('계근대(B) — 만차 축중량', [
+            Row(children: [
+              for (int i = 0; i < 4; i++) ...[
+                Expanded(
+                    child:
+                        _numField('${i + 1}축', _scaleFullCtrl[i], hint: 'kg')),
+                if (i < 3) const SizedBox(width: 6),
+              ],
+            ]),
+            const SizedBox(height: 8),
+            _numField('만차 총중량(kg)', _scaleFullCtrl[4]),
+          ]),
+          const SizedBox(height: 10),
+          _section('계근대 타입', [
+            Row(children: [
+              _typeChip('계근대'),
+              const SizedBox(width: 12),
+              _typeChip('이동식축중기'),
+            ]),
+          ]),
+          const SizedBox(height: 80),
+        ]),
+
+        // ── Tab 3: 장착 사진 ──────────────────────────────────────
+        GridView.builder(
+          padding: const EdgeInsets.all(16),
+          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+              crossAxisCount: 2,
+              crossAxisSpacing: 12,
+              mainAxisSpacing: 12,
+              childAspectRatio: 0.9),
+          itemCount: kPhotoSlots.length,
+          itemBuilder: (ctx, i) {
+            final slot = kPhotoSlots[i];
+            return PhotoSlotWidget(
+              slotKey: slot.key,
+              label: slot.label,
+              photoPath: _slotPaths[slot.key],
+              onPhotoSaved: (path) =>
+                  setState(() => _slotPaths[slot.key] = path),
+              onRemove: _slotPaths[slot.key] != null
+                  ? () => setState(() => _slotPaths.remove(slot.key))
+                  : null,
+            );
+          },
+        ),
+      ]),
+    );
+  }
+
+  Widget _section(String title, List<Widget> children) => Card(
+        child: Padding(
+          padding: const EdgeInsets.all(14),
+          child:
+              Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(title,
+                style: const TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.bold,
+                    color: AppTheme.primaryColor)),
+            const Divider(height: 14),
+            ...children,
+          ]),
+        ),
+      );
+
+  Widget _numField(String label, TextEditingController ctrl, {String? hint}) =>
+      Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text(label,
+            style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500)),
+        const SizedBox(height: 4),
+        TextField(
+          controller: ctrl,
+          keyboardType: TextInputType.number,
+          style: const TextStyle(fontSize: 13),
+          decoration: InputDecoration(
+            hintText: hint,
+            hintStyle: TextStyle(fontSize: 12, color: Colors.grey.shade400),
+            filled: true,
+            fillColor: Colors.white,
+            isDense: true,
+            contentPadding:
+                const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+            border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(7),
+                borderSide: const BorderSide(color: Color(0xFFDDE3DD))),
+            enabledBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(7),
+                borderSide: const BorderSide(color: Color(0xFFDDE3DD))),
+            focusedBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(7),
+                borderSide:
+                    const BorderSide(color: AppTheme.primaryColor, width: 1.5)),
+          ),
+        ),
+      ]);
+
+  Widget _typeChip(String label) {
+    final selected = _scaleType == label;
+    return GestureDetector(
+      onTap: () => setState(() => _scaleType = selected ? '' : label),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        decoration: BoxDecoration(
+          color: selected ? AppTheme.primaryColor : Colors.white,
+          border: Border.all(
+              color: selected ? AppTheme.primaryColor : Colors.grey.shade300),
+          borderRadius: BorderRadius.circular(20),
+        ),
+        child: Text(label,
+            style: TextStyle(
+                color: selected ? Colors.white : Colors.grey.shade700,
+                fontWeight: selected ? FontWeight.w600 : FontWeight.normal)),
       ),
     );
   }

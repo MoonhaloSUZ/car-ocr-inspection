@@ -39,5 +39,11 @@ end
 post_install do |installer|
   installer.pods_project.targets.each do |target|
     flutter_additional_ios_build_settings(target)
-  end
-end
+    target.build_configurations.each do |config|
+      xcconfig_path = config.base_configuration_reference&.real_path
+      next unless xcconfig_path
+      xcconfig = File.read(xcconfig_path)
+      File.write(xcconfig_path, xcconfig.gsub('DT_TOOLCHAIN_DIR', 'TOOLCHAIN_DIR'))
+    end  # ← target.build_configurations.each 닫기
+  end  # ← installer.pods_project.targets.each 닫기
+end  # ← post_install 닫기
