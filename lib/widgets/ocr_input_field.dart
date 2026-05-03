@@ -36,8 +36,8 @@ class _OcrInputFieldState extends State<OcrInputField> {
     final picker = ImagePicker();
     final file = await picker.pickImage(
       source: source,
-      imageQuality: 90,
-      maxWidth: 2000,
+      imageQuality: 100, // JPEG 압축 손실 최소화
+      maxWidth: 2500,    // 더 높은 해상도로 문자 디테일 확보
     );
     if (file == null || !mounted) return;
 
