@@ -1,4 +1,6 @@
 import 'dart:io';
+import 'dart:math' show min, max;
+import 'dart:ui' show Rect;
 import 'package:flutter/foundation.dart';
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
 import 'package:image/image.dart' as img;
@@ -6,11 +8,11 @@ import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
 
 enum OcrFieldType {
-  plateNo, // 차량번호 - 한국 번호판 패턴
-  modemNo, // 모뎀번호 - 전화번호 패턴 012-xxxx-xxxx
-  sensorId, // 센서ID - 영숫자 코드
-  cameraId, // 카메라ID - CA로 시작하는 코드
-  general, // 일반 텍스트
+  plateNo,
+  modemNo,
+  sensorId,
+  cameraId,
+  general,
 }
 
 class OcrService {
@@ -20,10 +22,9 @@ class OcrService {
 
   // ── 이미지 전처리 (isolate) ────────────────────────────────
 
-  // 3가지 전처리 변형을 한 번에 생성
   // V1: 그레이스케일 + 대비 강화
   // V2: 그레이스케일 + 선명화 (unsharp mask)
-  // V3: 2배 확대 + 그레이스케일 + 대비 강화 (번호판이 작게 찍혔을 때)
+  // V3: 2배 확대 + 그레이스케일 + 대비 강화
   static List<Uint8List> _generateVariants(Uint8List bytes) {
     final decoded = img.decodeImage(bytes);
     if (decoded == null) return [];
@@ -37,7 +38,6 @@ class OcrService {
       filter: [0, -1, 0, -1, 5, -1, 0, -1, 0],
     );
 
-    // 최대 2배, width 3000px 이하로 비율 유지 확대
     final scale = (3000.0 / decoded.width).clamp(0.0, 2.0);
     final upscaled = img.copyResize(
       decoded,
@@ -58,13 +58,11 @@ class OcrService {
     final bytes = await File(imagePath).readAsBytes();
     final variants = await compute(_generateVariants, bytes);
     final dir = await getTemporaryDirectory();
-    final paths = <String>[];
-    for (final v in variants) {
+    return Future.wait(variants.map((v) async {
       final path = '${dir.path}/${const Uuid().v4()}_ocr.jpg';
       await File(path).writeAsBytes(v);
-      paths.add(path);
-    }
-    return paths;
+      return path;
+    }));
   }
 
   // ── 공개 API ───────────────────────────────────────────────
@@ -81,22 +79,134 @@ class OcrService {
     return _runOcr(imagePath, fieldType);
   }
 
-  // ── 차량번호 전용 ──────────────────────────────────────────
+  // ── 차량번호 인식 흐름 ─────────────────────────────────────
+  //
+  // 1단계: 원본 + 전처리 3종으로 전체 이미지 OCR 시도
+  // 2단계: 실패 시 1차 OCR 결과의 bounding box로 번호판 영역 크롭 + 확대 후 재시도
+  //        (한글이 드롭됐더라도 숫자 블록 bounding box로 번호판 위치 추정 가능)
 
-  // 원본 → V1(대비) → V2(선명화) → V3(확대+대비) 순으로 시도, 첫 매칭 반환
   Future<OcrResult> _recognizePlate(String imagePath) async {
     final variantPaths = await _prepareVariantPaths(imagePath);
+
+    // 1단계: 전체 이미지 시도
+    OcrResult? fallbackResult;
     for (final path in [imagePath, ...variantPaths]) {
       final result = await _runPlateOcr(path);
       if (result.hasResult) return result;
+      fallbackResult ??= result;
     }
-    // 모든 시도 실패 시 원본 결과 반환 (후보 다이얼로그용 rawText 포함)
-    return _runPlateOcr(imagePath);
+
+    // 2단계: bounding box 기반 크롭 + 확대 후 재시도
+    final croppedPath = await _detectAndCropPlate(imagePath);
+    if (croppedPath != null) {
+      final croppedVariants = await _prepareVariantPaths(croppedPath);
+      for (final path in [croppedPath, ...croppedVariants]) {
+        final result = await _runPlateOcr(path);
+        if (result.hasResult) return result;
+      }
+    }
+
+    return fallbackResult ?? await _runPlateOcr(imagePath);
   }
 
-  // 한국어 + 라틴 두 패스 병렬 인식 후 병합
-  // - 한국어 패스: 한글 문자 인식에 강함
-  // - 라틴 패스: 숫자/영문 정확도 높음, 보조 역할
+  // ── 번호판 영역 감지 + 크롭 ───────────────────────────────
+
+  // 1차 OCR에서 4자리 숫자 블록(뒷번호)의 bounding box를 앵커로 삼아
+  // 번호판 전체 영역을 추정하고 크롭+확대한 임시 파일 경로 반환
+  Future<String?> _detectAndCropPlate(String imagePath) async {
+    final korRec = TextRecognizer(script: TextRecognitionScript.korean);
+    final latRec = TextRecognizer(script: TextRecognitionScript.latin);
+    try {
+      final inputImage = InputImage.fromFilePath(imagePath);
+      final results = await Future.wait([
+        korRec.processImage(inputImage),
+        latRec.processImage(inputImage),
+      ]);
+
+      // 4자리 이상 숫자를 포함한 모든 블록의 bounding box 합산
+      Rect? plateBbox;
+      final digitPattern = RegExp(r'\d{4}');
+      for (final recognized in results) {
+        for (final block in recognized.blocks) {
+          final text = block.text.replaceAll(RegExp(r'\s'), '');
+          if (digitPattern.hasMatch(text)) {
+            plateBbox = plateBbox == null
+                ? block.boundingBox
+                : plateBbox.expandToInclude(block.boundingBox);
+          }
+        }
+      }
+
+      if (plateBbox == null || plateBbox.isEmpty) return null;
+      return _cropAndUpscale(imagePath, plateBbox);
+    } catch (_) {
+      return null;
+    } finally {
+      korRec.close();
+      latRec.close();
+    }
+  }
+
+  // 감지된 영역 기준으로 패딩 추가 후 크롭, 최소 800px로 확대
+  Future<String?> _cropAndUpscale(String imagePath, Rect bbox) async {
+    try {
+      final bytes = await File(imagePath).readAsBytes();
+      final result = await compute(_cropAndUpscaleIsolate, _CropParams(
+        bytes: bytes,
+        left: bbox.left,
+        top: bbox.top,
+        right: bbox.right,
+        bottom: bbox.bottom,
+      ));
+      if (result == null) return null;
+
+      final dir = await getTemporaryDirectory();
+      final path = '${dir.path}/${const Uuid().v4()}_plate_crop.jpg';
+      await File(path).writeAsBytes(result);
+      return path;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static Uint8List? _cropAndUpscaleIsolate(_CropParams p) {
+    final decoded = img.decodeImage(p.bytes);
+    if (decoded == null) return null;
+
+    // 수평: 왼쪽 200%(앞번호+한글 포함), 오른쪽 50% 패딩
+    // 수직: 위아래 80% 패딩
+    final bboxW = p.right - p.left;
+    final bboxH = p.bottom - p.top;
+
+    final x = max(0, (p.left - bboxW * 2.0).toInt());
+    final y = max(0, (p.top - bboxH * 0.8).toInt());
+    final right = min(decoded.width, (p.right + bboxW * 0.5).toInt());
+    final bottom = min(decoded.height, (p.bottom + bboxH * 0.8).toInt());
+    final w = right - x;
+    final h = bottom - y;
+
+    if (w <= 0 || h <= 0) return null;
+
+    var cropped = img.copyCrop(decoded, x: x, y: y, width: w, height: h);
+
+    // 최소 800px 너비로 확대 (텍스트가 OCR하기 충분한 크기가 되도록)
+    if (cropped.width < 800) {
+      final upScale = 800.0 / cropped.width;
+      cropped = img.copyResize(
+        cropped,
+        width: 800,
+        height: (cropped.height * upScale).round(),
+        interpolation: img.Interpolation.cubic,
+      );
+    }
+
+    // 그레이스케일 + 대비 강화 적용
+    final enhanced = img.adjustColor(img.grayscale(cropped), contrast: 1.4);
+    return img.encodeJpg(enhanced, quality: 100);
+  }
+
+  // ── 한국어 + 라틴 두 패스 병렬 인식 ─────────────────────
+
   Future<OcrResult> _runPlateOcr(String imagePath) async {
     final korRec = TextRecognizer(script: TextRecognitionScript.korean);
     final latRec = TextRecognizer(script: TextRecognitionScript.latin);
@@ -114,7 +224,6 @@ class OcrService {
       final latLines = _toLines(lat);
       final latElems = _toElements(lat);
 
-      // 한국어 결과 우선 탐색, 라틴 보조
       final best = _findPlateNo([...korLines, ...latLines])
           ?? _findPlateNo([...korElems, ...latElems])
           ?? _findPlateNo([kor.text])
@@ -210,33 +319,27 @@ class OcrService {
     }
   }
 
-  // 번호판 한글 위치 오인식 보정 맵 (한글 위치에만 적용)
+  // 번호판 한글 위치 오인식 보정 맵
   static const Map<String, String> _plateOcrFix = {
-    '1': '고', // 고 → 1 (수직선 혼동)
-    '7': '고', // 고 → 7 (ㄱ 형태 혼동)
-    '6': '고', // 고 → 6 (형태 혼동)
-    '0': '오', // 오 → 0 (원형 혼동)
-    '8': '바', // 바 → 8 (ㅂ 형태 혼동)
+    '1': '고',
+    '7': '고',
+    '6': '고',
+    '0': '오',
+    '8': '바',
   };
 
   static final _wsPattern = RegExp(r'\s+');
   static final _exactPlatePattern = RegExp(r'\d{2,3}[가-힣]\d{4}');
 
-  // 한국 차량번호 패턴: 숫자2-3 + 한글1 + 숫자4
   String? _findPlateNo(List<String> lines) {
-    // 1단계: 각 라인 정확 매칭 (모든 공백·뉴라인 제거)
     for (final line in lines) {
       final clean = line.replaceAll(_wsPattern, '');
       final m = _exactPlatePattern.firstMatch(clean);
       if (m != null) return m.group(0);
     }
-
-    // 2단계: 전체 라인 join (한글이 별도 블록으로 인식된 경우 복원)
     final joined = lines.join('').replaceAll(_wsPattern, '');
     final mj = _exactPlatePattern.firstMatch(joined);
     if (mj != null) return mj.group(0);
-
-    // 3단계: 한글이 숫자로 오인식된 경우 퍼지 보정
     return _fuzzyPlateNo(lines);
   }
 
@@ -245,17 +348,13 @@ class OcrService {
       ...lines.map((l) => l.replaceAll(_wsPattern, '')),
       lines.join('').replaceAll(_wsPattern, ''),
     ];
-
     for (final clean in candidates) {
-      // 3자리 앞번호: NNN + 한글(오인식) + NNNN = 8자리
       final m8 =
           RegExp(r'(?<!\d)(\d{3})(\d)(\d{4})(?!\d)').firstMatch(clean);
       if (m8 != null) {
         final fixed = _plateOcrFix[m8.group(2)!];
         if (fixed != null) return '${m8.group(1)}$fixed${m8.group(3)}';
       }
-
-      // 2자리 앞번호: NN + 한글(오인식) + NNNN = 7자리
       final m7 =
           RegExp(r'(?<!\d)(\d{2})(\d)(\d{4})(?!\d)').firstMatch(clean);
       if (m7 != null) {
@@ -266,7 +365,6 @@ class OcrService {
     return null;
   }
 
-  // 모뎀번호 패턴: 010/012-xxxx-xxxx
   String? _findModemNo(List<String> lines) {
     final pattern = RegExp(r'0\d{2}[-–]\d{3,4}[-–]\d{4}');
     for (final line in lines) {
@@ -276,7 +374,6 @@ class OcrService {
     return null;
   }
 
-  // 센서ID 패턴: RLS, WS, T2-STR, T3-STR 등
   String? _findSensorId(List<String> lines) {
     final patterns = [
       RegExp(r'T[23]-STR\d{2}-\d{3}', caseSensitive: false),
@@ -295,7 +392,6 @@ class OcrService {
     return null;
   }
 
-  // 카메라ID 패턴: CA + 숫자 (예: CA21-008, CALS-091)
   String? _findCameraId(List<String> lines) {
     final pattern =
         RegExp(r'CA(?:LS)?[A-Z0-9]*[-]\d{3}', caseSensitive: false);
@@ -308,6 +404,19 @@ class OcrService {
   }
 
   bool get isAvailable => Platform.isAndroid || Platform.isIOS;
+}
+
+// compute()로 전달되는 크롭 파라미터 (isolate-safe)
+class _CropParams {
+  final Uint8List bytes;
+  final double left, top, right, bottom;
+  const _CropParams({
+    required this.bytes,
+    required this.left,
+    required this.top,
+    required this.right,
+    required this.bottom,
+  });
 }
 
 class OcrResult {
