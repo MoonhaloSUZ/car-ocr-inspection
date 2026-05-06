@@ -20,13 +20,12 @@ class OcrService {
   factory OcrService() => _instance;
   OcrService._internal();
 
-  // ── 이미지 전처리 변형 생성 (isolate) ─────────────────────
+  // ── 이미지 전처리 변형 (isolate) ──────────────────────────
 
   static List<Uint8List> _generateVariants(Uint8List bytes) {
     final decoded = img.decodeImage(bytes);
     if (decoded == null) return [];
     final gray = img.grayscale(decoded);
-
     final v1 = img.adjustColor(gray, contrast: 1.3, brightness: 1.05);
     final v2 = img.convolution(
       img.gaussianBlur(gray, radius: 1),
@@ -40,7 +39,6 @@ class OcrService {
       interpolation: img.Interpolation.cubic,
     );
     final v3 = img.adjustColor(img.grayscale(upscaled), contrast: 1.3);
-
     return [
       img.encodeJpg(v1, quality: 95),
       img.encodeJpg(v2, quality: 95),
@@ -59,7 +57,7 @@ class OcrService {
     }));
   }
 
-  // ── 공개 API ───────────────────────────────────────────────
+  // ── 공개 API ──────────────────────────────────────────────
 
   Future<OcrResult> recognize(String imagePath, OcrFieldType fieldType) async {
     if (fieldType == OcrFieldType.plateNo) {
@@ -73,120 +71,163 @@ class OcrService {
     return _runOcr(imagePath, fieldType);
   }
 
-  // ── 차량번호 인식 흐름 ─────────────────────────────────────
-  //
-  // 1단계: 원본 + 전처리 3종으로 전체 이미지 OCR
-  // 2단계: 실패 시 숫자 bounding box 기반 번호판 크롭 후 재시도
-  // ★ 매칭 성공 후: 한글 위치만 정밀 크롭+확대하여 한글 재인식 (사↔고 오인식 교정)
+  // ── 차량번호 인식 흐름 ────────────────────────────────────
 
   Future<OcrResult> _recognizePlate(String imagePath) async {
     final variantPaths = await _prepareVariantPaths(imagePath);
-
     OcrResult? fallbackResult;
+
     for (final path in [imagePath, ...variantPaths]) {
-      final result = await _runPlateOcr(path);
-      if (result.hasResult) {
-        return _withRefinedKorean(result, path);
+      final inter = await _runPlateOcr(path);
+      if (inter.result.hasResult) {
+        return _withRefinedKorean(inter, path);
       }
-      fallbackResult ??= result;
+      fallbackResult ??= inter.result;
     }
 
+    // 번호판 영역 크롭 후 재시도
     final croppedPath = await _detectAndCropPlate(imagePath);
     if (croppedPath != null) {
       final croppedVariants = await _prepareVariantPaths(croppedPath);
       for (final path in [croppedPath, ...croppedVariants]) {
-        final result = await _runPlateOcr(path);
-        if (result.hasResult) {
-          return _withRefinedKorean(result, path);
+        final inter = await _runPlateOcr(path);
+        if (inter.result.hasResult) {
+          return _withRefinedKorean(inter, path);
         }
       }
     }
 
-    return fallbackResult ?? await _runPlateOcr(imagePath);
+    return fallbackResult ?? (await _runPlateOcr(imagePath)).result;
   }
 
-  // ── 한글 자 정밀 재인식 ────────────────────────────────────
+  // ── 한글 자 정밀 재인식 (핵심 로직) ─────────────────────
+  //
+  // 문제: ML Kit이 "허" → "0"(ㅎ 원형) + "고"(나머지)로 단편화
+  //   → 앞 숫자 영역에 "0"이 섞여 "02" → "020"으로 오집계 → 포맷 오판
+  //
+  // 해결:
+  //   1) 뒷번호(4자리) bbox에서 cw = width / 4 추정
+  //   2) front element 기준선을 rear.left - cw*0.8로 좁혀 한글 파편 제외
+  //   3) 실제 front digit 자릿수로 포맷 결정 (2→2+1+4, ≥3→3+1+4)
+  //   4) 한글 구간 = [rear.left - 1.6*cw, rear.left + 0.15*cw] (포맷 무관)
+  //   5) 400px 확대 + 강화 contrast로 한글 재인식 → 앞·뒤 숫자와 합성
 
-  // 1차 매칭에서 얻은 판번호의 한글 위치를 bounding box로 찾아
-  // 해당 영역만 300px 높이로 확대 후 한글만 재인식
-  // 예: "96고2268" → 한글 위치 크롭 → 재인식 → "사" → "96사2268"
   Future<OcrResult> _withRefinedKorean(
-      OcrResult result, String imagePath) async {
-    final plate = result.bestMatch!;
+      _PlateOcrInter inter, String imagePath) async {
+    final result = inter.result;
+    final korRaw = inter.korRecognized;
+    final latRaw = inter.latRecognized;
+    if (korRaw == null || latRaw == null) return result;
 
-    final korRec = TextRecognizer(script: TextRecognitionScript.korean);
     try {
-      final recognized =
-          await korRec.processImage(InputImage.fromFilePath(imagePath));
+      // 모든 element 수집 + x좌표 정렬
+      final elems = <_TextElem>[];
+      for (final rec in [korRaw, latRaw]) {
+        for (final block in rec.blocks) {
+          for (final line in block.lines) {
+            for (final elem in line.elements) {
+              final t = elem.text.replaceAll(RegExp(r'\s'), '');
+              if (t.isNotEmpty) elems.add(_TextElem(t, elem.boundingBox));
+            }
+          }
+        }
+      }
+      elems.sort((a, b) => a.bbox.left.compareTo(b.bbox.left));
 
-      final korBbox = _findKoreanCharBbox(recognized, plate);
-      if (korBbox == null) return result;
+      // 뒷번호(4자리) 탐색: 오른쪽부터 첫 번째 \d{4} element
+      _TextElem? rear;
+      for (final e in elems.reversed) {
+        if (RegExp(r'\d{4}').hasMatch(e.text)) {
+          rear = e;
+          break;
+        }
+      }
+      if (rear == null) return result;
 
-      final charPath = await _cropToKoreanChar(imagePath, korBbox);
+      // 글자 1개 폭 추정
+      final cw = rear.bbox.width / 4.0;
+      if (cw <= 0) return result;
+
+      // front element: 한글 구간(≈rear.left-cw ~ rear.left) 제외하고 좌측만
+      // "허"가 "0"으로 파편화돼도 rear.left - cw*0.8 기준선 안쪽에 있으므로 배제
+      final frontCutoff = rear.bbox.left - cw * 0.8;
+      final frontElems = elems
+          .where((e) =>
+              e.bbox.right < frontCutoff &&
+              RegExp(r'\d').hasMatch(e.text))
+          .toList();
+      if (frontElems.isEmpty) return result;
+
+      // 한글 구간: rear.left 기준으로 역산 (포맷 무관하게 항상 직전 1글자)
+      final allTops = [...frontElems.map((e) => e.bbox.top), rear.bbox.top];
+      final allBottoms = [...frontElems.map((e) => e.bbox.bottom), rear.bbox.bottom];
+      final charTop = allTops.reduce(min) - cw * 0.4;
+      final charBottom = allBottoms.reduce(max) + cw * 0.4;
+
+      // 왼쪽을 1.6*cw까지 넓혀 파편화된 한글 조각도 포함
+      final korRegion = Rect.fromLTRB(
+        rear.bbox.left - cw * 1.6,
+        charTop,
+        rear.bbox.left + cw * 0.15,
+        charBottom,
+      );
+
+      if (korRegion.width <= 0 || korRegion.height <= 0) return result;
+
+      // 한글 구간 크롭 + 400px 확대
+      final charPath = await _cropToKoreanChar(imagePath, korRegion);
       if (charPath == null) return result;
 
-      final charRec = TextRecognizer(script: TextRecognitionScript.korean);
-      try {
-        final charResult =
-            await charRec.processImage(InputImage.fromFilePath(charPath));
-        final refined = RegExp(r'[가-힣]')
-            .firstMatch(charResult.text.replaceAll(RegExp(r'\s'), ''))
-            ?.group(0);
-
-        if (refined != null) {
-          final refinedPlate =
-              plate.replaceFirst(RegExp(r'[가-힣]'), refined);
-          return OcrResult(
-            rawText: result.rawText,
-            allLines: result.allLines,
-            elements: result.elements,
-            bestMatch: refinedPlate,
-            fieldType: result.fieldType,
-          );
+      // 한글 OCR: 원본 + 전처리 variant 전부 시도
+      String? refined;
+      final korVariants = await _prepareVariantPaths(charPath);
+      for (final path in [charPath, ...korVariants]) {
+        final rec = TextRecognizer(script: TextRecognitionScript.korean);
+        try {
+          final r = await rec.processImage(InputImage.fromFilePath(path));
+          final kor = RegExp(r'[가-힣]')
+              .firstMatch(r.text.replaceAll(RegExp(r'\s'), ''))
+              ?.group(0);
+          if (kor != null) {
+            refined = kor;
+            break;
+          }
+        } finally {
+          rec.close();
         }
-      } finally {
-        charRec.close();
       }
+
+      if (refined == null) return result;
+
+      // 앞 숫자: 한글 영역 밖 element만 남겼으므로 실제 자릿수 = 포맷 결정
+      final frontDigitsAll = frontElems
+          .map((e) => e.text.replaceAll(RegExp(r'[^\d]'), ''))
+          .join();
+      if (frontDigitsAll.length < 2) return result;
+      final nFront = frontDigitsAll.length >= 3 ? 3 : 2;
+      final frontStr = frontDigitsAll.substring(0, nFront);
+
+      // 뒷 숫자: rear element에서 마지막 4자리
+      final rearDigits = rear.text.replaceAll(RegExp(r'[^\d]'), '');
+      if (rearDigits.length < 4) return result;
+      final rearStr = rearDigits.substring(rearDigits.length - 4);
+
+      final refinedPlate = '$frontStr$refined$rearStr';
+      if (!_exactPlatePattern.hasMatch(refinedPlate)) return result;
+
+      return OcrResult(
+        rawText: result.rawText,
+        allLines: result.allLines,
+        elements: result.elements,
+        bestMatch: refinedPlate,
+        fieldType: result.fieldType,
+      );
     } catch (_) {
-    } finally {
-      korRec.close();
+      return result;
     }
-
-    return result;
   }
 
-  // OCR 결과에서 한글 원소의 bounding box 탐색
-  // 1순위: 한글 단독 element
-  // 2순위: 복합 element 내 한글 위치를 문자 폭으로 계산
-  Rect? _findKoreanCharBbox(RecognizedText recognized, String plate) {
-    for (final block in recognized.blocks) {
-      for (final line in block.lines) {
-        for (final element in line.elements) {
-          if (RegExp(r'^[가-힣]$').hasMatch(element.text.trim())) {
-            return element.boundingBox;
-          }
-        }
-      }
-    }
-    for (final block in recognized.blocks) {
-      for (final line in block.lines) {
-        for (final element in line.elements) {
-          final text = element.text.replaceAll(RegExp(r'\s'), '');
-          final m = RegExp(r'[가-힣]').firstMatch(text);
-          if (m != null) {
-            final charWidth = element.boundingBox.width / text.length;
-            return Rect.fromLTWH(
-              element.boundingBox.left + charWidth * m.start,
-              element.boundingBox.top,
-              charWidth,
-              element.boundingBox.height,
-            );
-          }
-        }
-      }
-    }
-    return null;
-  }
+  // ── 한글 구간 크롭 + 확대 ────────────────────────────────
 
   Future<String?> _cropToKoreanChar(String imagePath, Rect bbox) async {
     try {
@@ -194,12 +235,11 @@ class OcrService {
       final result = await compute(
           _cropCharIsolate,
           _CropParams(
-            bytes: bytes,
-            left: bbox.left,
-            top: bbox.top,
-            right: bbox.right,
-            bottom: bbox.bottom,
-          ));
+              bytes: bytes,
+              left: bbox.left,
+              top: bbox.top,
+              right: bbox.right,
+              bottom: bbox.bottom));
       if (result == null) return null;
       final dir = await getTemporaryDirectory();
       final path = '${dir.path}/${const Uuid().v4()}_kor_char.jpg';
@@ -210,16 +250,14 @@ class OcrService {
     }
   }
 
-  // 한글 한 글자만 크롭: 상하좌우 50% 패딩 + 300px 높이로 확대 + 대비 강화
   static Uint8List? _cropCharIsolate(_CropParams p) {
     final decoded = img.decodeImage(p.bytes);
     if (decoded == null) return null;
-
     final bboxW = p.right - p.left;
     final bboxH = p.bottom - p.top;
-    final padX = (bboxW * 0.5).toInt();
-    final padY = (bboxH * 0.5).toInt();
-
+    // 호출자가 이미 넉넉한 region을 전달하므로 padding 최소화
+    final padX = (bboxW * 0.08).toInt();
+    final padY = (bboxH * 0.08).toInt();
     final x = max(0, (p.left - padX).toInt());
     final y = max(0, (p.top - padY).toInt());
     final right = min(decoded.width, (p.right + padX).toInt());
@@ -227,25 +265,22 @@ class OcrService {
     final w = right - x;
     final h = bottom - y;
     if (w <= 0 || h <= 0) return null;
-
     var cropped = img.copyCrop(decoded, x: x, y: y, width: w, height: h);
-
-    if (cropped.height < 300) {
-      final upScale = 300.0 / cropped.height;
+    if (cropped.height < 400) {
+      final s = 400.0 / cropped.height;
       cropped = img.copyResize(
         cropped,
-        width: (cropped.width * upScale).round(),
-        height: 300,
+        width: (cropped.width * s).round(),
+        height: 400,
         interpolation: img.Interpolation.cubic,
       );
     }
-
-    final enhanced =
-        img.adjustColor(img.grayscale(cropped), contrast: 1.5, brightness: 1.05);
-    return img.encodeJpg(enhanced, quality: 100);
+    return img.encodeJpg(
+        img.adjustColor(img.grayscale(cropped), contrast: 1.8, brightness: 1.1),
+        quality: 100);
   }
 
-  // ── 번호판 영역 감지 + 크롭 ───────────────────────────────
+  // ── 번호판 영역 감지 + 크롭 ──────────────────────────────
 
   Future<String?> _detectAndCropPlate(String imagePath) async {
     final korRec = TextRecognizer(script: TextRecognitionScript.korean);
@@ -256,20 +291,17 @@ class OcrService {
         korRec.processImage(inputImage),
         latRec.processImage(inputImage),
       ]);
-
       Rect? plateBbox;
       final digitPattern = RegExp(r'\d{4}');
-      for (final recognized in results) {
-        for (final block in recognized.blocks) {
-          if (digitPattern
-              .hasMatch(block.text.replaceAll(RegExp(r'\s'), ''))) {
+      for (final rec in results) {
+        for (final block in rec.blocks) {
+          if (digitPattern.hasMatch(block.text.replaceAll(RegExp(r'\s'), ''))) {
             plateBbox = plateBbox == null
                 ? block.boundingBox
                 : plateBbox.expandToInclude(block.boundingBox);
           }
         }
       }
-
       if (plateBbox == null || plateBbox.isEmpty) return null;
       return _cropAndUpscale(imagePath, plateBbox);
     } catch (_) {
@@ -286,12 +318,11 @@ class OcrService {
       final result = await compute(
           _cropAndUpscaleIsolate,
           _CropParams(
-            bytes: bytes,
-            left: bbox.left,
-            top: bbox.top,
-            right: bbox.right,
-            bottom: bbox.bottom,
-          ));
+              bytes: bytes,
+              left: bbox.left,
+              top: bbox.top,
+              right: bbox.right,
+              bottom: bbox.bottom));
       if (result == null) return null;
       final dir = await getTemporaryDirectory();
       final path = '${dir.path}/${const Uuid().v4()}_plate_crop.jpg';
@@ -305,10 +336,8 @@ class OcrService {
   static Uint8List? _cropAndUpscaleIsolate(_CropParams p) {
     final decoded = img.decodeImage(p.bytes);
     if (decoded == null) return null;
-
     final bboxW = p.right - p.left;
     final bboxH = p.bottom - p.top;
-
     final x = max(0, (p.left - bboxW * 2.0).toInt());
     final y = max(0, (p.top - bboxH * 0.8).toInt());
     final right = min(decoded.width, (p.right + bboxW * 0.5).toInt());
@@ -316,27 +345,23 @@ class OcrService {
     final w = right - x;
     final h = bottom - y;
     if (w <= 0 || h <= 0) return null;
-
     var cropped = img.copyCrop(decoded, x: x, y: y, width: w, height: h);
-
     if (cropped.width < 800) {
-      final upScale = 800.0 / cropped.width;
+      final s = 800.0 / cropped.width;
       cropped = img.copyResize(
         cropped,
         width: 800,
-        height: (cropped.height * upScale).round(),
+        height: (cropped.height * s).round(),
         interpolation: img.Interpolation.cubic,
       );
     }
-
-    final enhanced =
-        img.adjustColor(img.grayscale(cropped), contrast: 1.4);
-    return img.encodeJpg(enhanced, quality: 100);
+    return img.encodeJpg(
+        img.adjustColor(img.grayscale(cropped), contrast: 1.4), quality: 100);
   }
 
   // ── 한국어 + 라틴 두 패스 병렬 인식 ─────────────────────
 
-  Future<OcrResult> _runPlateOcr(String imagePath) async {
+  Future<_PlateOcrInter> _runPlateOcr(String imagePath) async {
     final korRec = TextRecognizer(script: TextRecognitionScript.korean);
     final latRec = TextRecognizer(script: TextRecognitionScript.latin);
     try {
@@ -347,31 +372,32 @@ class OcrService {
       ]);
       final kor = results[0];
       final lat = results[1];
-
       final korLines = _toLines(kor);
       final korElems = _toElements(kor);
       final latLines = _toLines(lat);
       final latElems = _toElements(lat);
-
       final best = _findPlateNo([...korLines, ...latLines])
           ?? _findPlateNo([...korElems, ...latElems])
           ?? _findPlateNo([kor.text])
           ?? _findPlateNo([lat.text]);
-
-      return OcrResult(
+      final result = OcrResult(
         rawText: kor.text,
         allLines: korLines,
         elements: korElems,
         bestMatch: best,
         fieldType: OcrFieldType.plateNo,
       );
+      return _PlateOcrInter(result, kor, lat);
     } catch (e) {
-      return OcrResult(
-        rawText: '',
-        allLines: [],
-        bestMatch: null,
-        fieldType: OcrFieldType.plateNo,
-        error: e.toString(),
+      return _PlateOcrInter(
+        OcrResult(
+            rawText: '',
+            allLines: [],
+            bestMatch: null,
+            fieldType: OcrFieldType.plateNo,
+            error: e.toString()),
+        null,
+        null,
       );
     } finally {
       korRec.close();
@@ -390,26 +416,24 @@ class OcrService {
       final elements = _toElements(recognized);
       final best = _extractBest(recognized.text, lines, elements, fieldType);
       return OcrResult(
-        rawText: recognized.text,
-        allLines: lines,
-        elements: elements,
-        bestMatch: best,
-        fieldType: fieldType,
-      );
+          rawText: recognized.text,
+          allLines: lines,
+          elements: elements,
+          bestMatch: best,
+          fieldType: fieldType);
     } catch (e) {
       return OcrResult(
-        rawText: '',
-        allLines: [],
-        bestMatch: null,
-        fieldType: fieldType,
-        error: e.toString(),
-      );
+          rawText: '',
+          allLines: [],
+          bestMatch: null,
+          fieldType: fieldType,
+          error: e.toString());
     } finally {
       recognizer.close();
     }
   }
 
-  // ── 텍스트 추출 헬퍼 ──────────────────────────────────────
+  // ── 텍스트 추출 ───────────────────────────────────────────
 
   List<String> _toLines(RecognizedText r) => r.blocks
       .expand((b) => b.lines)
@@ -426,12 +450,8 @@ class OcrService {
 
   // ── 패턴 매칭 ─────────────────────────────────────────────
 
-  String? _extractBest(
-    String fullText,
-    List<String> lines,
-    List<String> elements,
-    OcrFieldType type,
-  ) {
+  String? _extractBest(String fullText, List<String> lines,
+      List<String> elements, OcrFieldType type) {
     switch (type) {
       case OcrFieldType.plateNo:
         return _findPlateNo(lines)
@@ -534,16 +554,30 @@ class OcrService {
   bool get isAvailable => Platform.isAndroid || Platform.isIOS;
 }
 
+// ── 내부 헬퍼 클래스 ──────────────────────────────────────
+
+class _PlateOcrInter {
+  final OcrResult result;
+  final RecognizedText? korRecognized;
+  final RecognizedText? latRecognized;
+  const _PlateOcrInter(this.result, this.korRecognized, this.latRecognized);
+}
+
+class _TextElem {
+  final String text;
+  final Rect bbox;
+  const _TextElem(this.text, this.bbox);
+}
+
 class _CropParams {
   final Uint8List bytes;
   final double left, top, right, bottom;
-  const _CropParams({
-    required this.bytes,
-    required this.left,
-    required this.top,
-    required this.right,
-    required this.bottom,
-  });
+  const _CropParams(
+      {required this.bytes,
+      required this.left,
+      required this.top,
+      required this.right,
+      required this.bottom});
 }
 
 class OcrResult {
